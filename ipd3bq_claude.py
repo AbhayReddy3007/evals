@@ -87,10 +87,12 @@ class _AlloyDBStub:
 BQ_PROJECT_ID  = os.getenv("BQ_PROJECT_ID", "cognito-prod-394707")
 BQ_DATASET_ID  = os.getenv("BQ_DATASET_ID", "cognito_prod_datamart")
 BQ_TABLE_ID    = os.getenv("BQ_LOE_TABLE_NAME", "Master_LOE")
-CREDENTIALS_PATH = os.getenv("CREDENTIALS_PATH") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+BQ_LOCATION    = os.getenv("BQ_LOCATION", "asia-south1")
+
+# Credentials: check CREDENTIALS_PATH first (user .env), then GOOGLE_APPLICATION_CREDENTIALS
+CREDENTIALS_PATH = os.environ.get("CREDENTIALS_PATH") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
 if CREDENTIALS_PATH and not os.path.isabs(CREDENTIALS_PATH):
     CREDENTIALS_PATH = os.path.join(SCRIPT_DIR, CREDENTIALS_PATH)
-BQ_LOCATION    = os.getenv("BQ_LOCATION", "asia-south1")
 
 # ── LLM Config ────────────────────────────────────────────────────────────────
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
@@ -167,21 +169,21 @@ def load_data_from_csv(csv_path: str) -> pd.DataFrame:
 
 def load_data_from_bigquery() -> pd.DataFrame:
     table_ref = f"{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}"
-    print(f"[BigQuery] Reading table: {table_ref}")
-    credentials = _get_credentials()
-    client = bigquery.Client(project=BQ_PROJECT_ID, credentials=credentials)
+    print(f"[BigQuery] Connecting to: {table_ref}  (location={BQ_LOCATION})")
 
-    print(f"[BigQuery] Using list_rows() (no query job needed)")
-    df = client.list_rows(table_ref).to_dataframe(dtypes={})
-    print(f"[BigQuery] Loaded {len(df)} raw rows")
+    client = _bq_client()
 
-    # Dedup: keep latest row per Patent_Number (replaces SQL ROW_NUMBER)
-    if "created_at" in df.columns and "Patent_Number" in df.columns:
-        df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
-        df = df.sort_values("created_at", ascending=False).drop_duplicates(
-            subset=["Patent_Number"], keep="first"
-        ).reset_index(drop=True)
-        print(f"[BigQuery] After dedup: {len(df)} rows")
+    query = f"""
+    SELECT * EXCEPT(rn) FROM (
+        SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY Patent_Number ORDER BY created_at DESC
+        ) AS rn
+        FROM `{table_ref}`
+    ) WHERE rn = 1
+    """
+    print(f"[BigQuery] Running ROW_NUMBER dedup query...")
+    df = client.query(query).to_dataframe()
+    print(f"[BigQuery] Loaded {len(df)} rows")
 
     bq_to_code = {
         "Drug_Name": "Drug Name", "Patent_Number": "Patent Number",
@@ -685,8 +687,11 @@ def _get_credentials():
         return service_account.Credentials.from_service_account_file(CREDENTIALS_PATH)
     return None
 
-def _get_bq_client():
-    return bigquery.Client(project=BQ_PROJECT_ID, credentials=_get_credentials())
+def _bq_client():
+    """Matches generate_tolerability_report.py pattern: location in constructor."""
+    return bigquery.Client(
+        project=BQ_PROJECT_ID, credentials=_get_credentials(), location=BQ_LOCATION
+    )
 
 
 def _flatten_circumvention(circumvention_by_drug):
@@ -782,7 +787,7 @@ def write_circumvention_to_bq(circumvention_by_drug):
     df_circ = pd.DataFrame(rows).drop_duplicates()
     df_circ["created_at"] = pd.Timestamp.now(tz="UTC")
     table_ref = f"{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_CIRC_TABLE}"
-    client = _get_bq_client()
+    client = _bq_client()
     try:
         existing = client.query(f"SELECT DISTINCT Drug_Name, Patent_Category FROM `{table_ref}`").to_dataframe()
         if not existing.empty:
@@ -808,7 +813,7 @@ def write_score_to_bq(drug_scores, refresh=False):
     df_score = pd.DataFrame(rows).drop_duplicates()
     df_score["created_at"] = pd.Timestamp.now(tz="UTC")
     table_ref = f"{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_SCORE_TABLE}"
-    client = _get_bq_client()
+    client = _bq_client()
     if refresh:
         for dn in df_score["Drug_Name"].dropna().unique():
             try:
