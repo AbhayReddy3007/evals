@@ -87,7 +87,9 @@ class _AlloyDBStub:
 BQ_PROJECT_ID  = os.getenv("BQ_PROJECT_ID", "cognito-prod-394707")
 BQ_DATASET_ID  = os.getenv("BQ_DATASET_ID", "cognito_prod_datamart")
 BQ_TABLE_ID    = os.getenv("BQ_LOE_TABLE_NAME", "Master_LOE")
-CREDENTIALS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+CREDENTIALS_PATH = os.getenv("CREDENTIALS_PATH") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+if CREDENTIALS_PATH and not os.path.isabs(CREDENTIALS_PATH):
+    CREDENTIALS_PATH = os.path.join(SCRIPT_DIR, CREDENTIALS_PATH)
 BQ_LOCATION    = os.getenv("BQ_LOCATION", "asia-south1")
 
 # ── LLM Config ────────────────────────────────────────────────────────────────
@@ -99,21 +101,87 @@ PROJECT_ID   = os.getenv("BQ_PROJECT_ID", "cognito-prod-394707")
 OUTPUT_DIR = os.getenv("IPD3_OUTPUT_DIR", os.path.join(SCRIPT_DIR, "ipd3_output"))
 
 
+def load_data_from_csv(csv_path: str) -> pd.DataFrame:
+    """Load patent data from a local CSV/Excel file instead of BigQuery."""
+    ext = os.path.splitext(csv_path)[1].lower()
+    print(f"[LOCAL] Loading data from: {csv_path}")
+    if ext in (".xlsx", ".xls"):
+        df = pd.read_excel(csv_path, dtype=str)
+    elif ext == ".tsv":
+        df = pd.read_csv(csv_path, sep="\t", dtype=str)
+    else:
+        df = pd.read_csv(csv_path, dtype=str)
+    df.columns = df.columns.str.strip()
+    print(f"[LOCAL] Loaded {len(df)} rows, columns: {list(df.columns)}")
+    bq_to_code = {
+        "Drug_Name": "Drug Name", "Patent_Number": "Patent Number",
+        "Jurisdiction": "Jurisdiction", "Tag": "Tag",
+        "Blocking_Category": "Blocking Category", "Reason": "Reason",
+        "Step_1_Claim_Category": "Step 1 Claim Category",
+        "Step_2_Matched_Elements": "Step 2 Matched Elements",
+        "S2_Active_Ingredient__Form": "S2 Active Ingredient Form",
+        "S2_Formulation_Details": "S2 Formulation Details",
+        "S2_Route_of_Administration": "S2 Route of Administration",
+        "S2_Device_Description": "S2 Device Description",
+        "S2_Combination_TechProcess": "S2 Combination TechProcess",
+        "Step_3_Technical_Barrier": "Step 3 Technical Barrier",
+        "Step_3_Confidence": "Step 3 Confidence",
+        "Step_3_Evidence_Type": "Step 3 Evidence Type",
+        "Step_3_Evidence_Summary": "Step 3 Evidence Summary",
+        "Step_4_Blocking_Indicator": "Step 4 Blocking Indicator",
+        "Step_4_Confidence": "Step 4 Confidence",
+        "Step_4_Regulatory_Failure_if_Removed": "Step 4 Regulatory Failure if Removed",
+        "Step_4_Bridging_Studies_Required": "Step 4 Bridging Studies Required",
+        "Step_4_Formulation_Consistent_Across_Phases": "Step 4 Formulation Consistent Across Phases",
+        "Step_4_Reason": "Step 4 Reason",
+        "Step_5_Novel__Difficult": "Step 5 Novel Difficult",
+        "Step_5_Novelty_Signal": "Step 5 Novelty Signal",
+        "Step_5_FirstinClass": "Step 5 FirstinClass",
+        "Step_5_Prior_Failed_Attempts": "Step 5 Prior Failed Attempts",
+        "Step_5_Complex_Implementation": "Step 5 Complex Implementation",
+        "Step_5_Confidence": "Step 5 Confidence",
+        "Step_5_Reason": "Step 5 Reason",
+        "Filing_Date": "Filing Date", "Grant_Date": "Grant Date",
+        "PTE_months": "PTE months", "Pediatric_Exclusivity": "Pediatric Exclusivity",
+        "Phase": "Phase", "Launch_Date": "Launch Date",
+        "Approval_Date": "Approval Date", "Approval_Date_Source": "Approval Date Source",
+        "Est_Approval_Year": "Est Approval Year",
+        "Exclusivity_Year": "Exclusivity Year",
+        "Controlling_Patent_Expiry_Year": "Controlling Patent Expiry Year",
+        "Years_to_Entry": "Years to Entry", "Avg_Years_to_Entry": "Avg Years to Entry",
+        "Score": "Score", "Avg_Years_to_Entry_US__EP": "Avg Years to Entry US EP",
+        "IP_Dimension_1_Score": "IP Dimension 1 Score",
+        "Source_File": "Source File", "Type": "Type",
+        "No_Of_Forecasted_Patents": "No Of Forecasted Patents",
+    }
+    rename_map = {k: v for k, v in bq_to_code.items() if k in df.columns}
+    if rename_map:
+        df.rename(columns=rename_map, inplace=True)
+    if "Patent Number" in df.columns and "created_at" in df.columns:
+        df = df.sort_values("created_at", ascending=False).drop_duplicates("Patent Number", keep="first")
+    elif "Patent Number" in df.columns:
+        df = df.drop_duplicates("Patent Number", keep="first")
+    print(f"[LOCAL] After dedup: {len(df)} rows")
+    return df
+
+
 def load_data_from_bigquery() -> pd.DataFrame:
     table_ref = f"{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}"
-    print(f"[BigQuery] Connecting to: {table_ref}  (location={BQ_LOCATION})")
+    print(f"[BigQuery] Reading table: {table_ref}")
     credentials = _get_credentials()
     client = bigquery.Client(project=BQ_PROJECT_ID, credentials=credentials)
-    query = f"""
-    SELECT * EXCEPT(rn) FROM (
-        SELECT *, ROW_NUMBER() OVER (
-            PARTITION BY Patent_Number ORDER BY created_at DESC
-        ) AS rn
-        FROM `{table_ref}`
-    ) WHERE rn = 1
-    """
-    df = client.query(query, location=BQ_LOCATION).to_dataframe()
-    print(f"[BigQuery] Loaded {len(df)} rows")
+
+    print(f"[BigQuery] Using list_rows() (no query job needed)")
+    df = client.list_rows(table_ref).to_dataframe(dtypes={})
+    print(f"[BigQuery] Loaded {len(df)} raw rows")
+
+    # Dedup: keep latest row per Patent_Number (replaces SQL ROW_NUMBER)
+    if "created_at" in df.columns and "Patent_Number" in df.columns:
+        df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
+        df = df.sort_values("created_at", ascending=False).drop_duplicates(
+            subset=["Patent_Number"], keep="first"
+        ).reset_index(drop=True)
+        print(f"[BigQuery] After dedup: {len(df)} rows")
 
     bq_to_code = {
         "Drug_Name": "Drug Name", "Patent_Number": "Patent Number",
@@ -771,13 +839,16 @@ def write_score_to_bq(drug_scores, refresh=False):
 EXCLUDED_CATEGORIES = {"Composition Of Matter"}
 
 def process_patents(skip_circumvention=False, drug_filter=None, refresh_scores=False,
-                    rerun=False, max_patents_per_category=10, no_bq=False):
+                    rerun=False, max_patents_per_category=10, no_bq=False, csv_input=None):
     """
     Main entry point. Returns a dict with circumvention_by_drug and drug_scores
     so the orchestrator can capture results directly when importing this module.
     """
-    # ── Load from BigQuery ────────────────────────────────────────────────
-    df = load_data_from_bigquery()
+    # ── Load data ─────────────────────────────────────────────────────────
+    if csv_input:
+        df = load_data_from_csv(csv_input)
+    else:
+        df = load_data_from_bigquery()
     df.columns = df.columns.str.strip()
     df = df.drop_duplicates()
 
@@ -958,6 +1029,8 @@ if __name__ == "__main__":
     parser.add_argument("--max-patents-per-category", type=int, default=10)
     parser.add_argument("--no-bq", action="store_true",
                         help="Skip all BigQuery writes; output local JSON only")
+    parser.add_argument("--csv-input", default=None,
+                        help="Load data from a local CSV/Excel file instead of BigQuery")
     args = parser.parse_args()
 
     process_patents(
@@ -965,5 +1038,6 @@ if __name__ == "__main__":
         refresh_scores=args.refresh_scores or args.rerun,
         rerun=args.rerun,
         max_patents_per_category=args.max_patents_per_category,
+        csv_input=args.csv_input,
         no_bq=args.no_bq,
     )
