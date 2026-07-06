@@ -866,6 +866,84 @@ def get_circumvention_for_drugs(non_blocking_df: pd.DataFrame, chroma_client,
 BQ_CIRC_TABLE   = "Circumvention_Table"
 BQ_SCORE_TABLE  = "Patent_Thicket_Score_Table"
 
+OUTPUT_DIR = os.getenv("IPD3_OUTPUT_DIR", os.path.join(SCRIPT_DIR, "ipd3_output"))
+
+
+def write_results_to_json(circumvention_by_drug: dict, drug_scores: list):
+    """Write Gemini pipeline results to local JSON files for orchestrator consumption."""
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    # ── Flatten circumvention ──────────────────────────────────────────────
+    if circumvention_by_drug:
+        rows = []
+        for drug_name, circ_data in circumvention_by_drug.items():
+            analysis_date = circ_data.get("analysis_date", "")
+            for category, cat_result in circ_data.get("results_by_category", {}).items():
+                strategies = cat_result.get("design_around_strategies", [])
+                common = dict(
+                    Drug_Name=drug_name, Patent_Category=category,
+                    Patents=", ".join(str(x) for x in cat_result.get("patent_numbers", [])),
+                    Num_Patents=int(cat_result.get("patent_count", 0)),
+                    Overall_Difficulty=cat_result.get("overall_circumvention_difficulty", "N/A"),
+                    Key_Claim_Limitations="; ".join(str(x) for x in cat_result.get("key_claim_limitations", [])),
+                    White_Space_Opportunities="; ".join(str(x) for x in cat_result.get("white_space_opportunities", [])),
+                    FDA_Precedents="; ".join(str(x) for x in cat_result.get("fda_precedents", [])),
+                    Orange_Book_Gaps="; ".join(str(x) for x in cat_result.get("orange_book_gaps", [])),
+                    Literature_Alternatives="; ".join(str(x) for x in cat_result.get("literature_alternatives", [])),
+                    Regulatory_Viability=cat_result.get("regulatory_viability", ""),
+                    Summary=cat_result.get("summary", ""),
+                    Analysis_Date=analysis_date, Model_Used="gemini-2.5-flash",
+                )
+                if not strategies:
+                    rows.append({**common, "Strategy": "No strategies identified",
+                                 "Rationale": "", "Feasibility": "",
+                                 "Regulatory_Pathway": "", "Prior_Art_Support": ""})
+                else:
+                    for s in strategies:
+                        rows.append({**common, "Strategy": s.get("strategy", ""),
+                                     "Rationale": s.get("rationale", ""),
+                                     "Feasibility": s.get("feasibility", ""),
+                                     "Regulatory_Pathway": s.get("regulatory_pathway", ""),
+                                     "Prior_Art_Support": s.get("prior_art_support", "")})
+        path = os.path.join(OUTPUT_DIR, "circumvention_gemini.json")
+        with open(path, "w") as f:
+            json.dump(rows, f, indent=2, default=str)
+        print(f"[JSON] Circumvention → {path} ({len(rows)} rows)")
+
+    # ── Flatten scores ─────────────────────────────────────────────────────
+    if drug_scores:
+        rows = []
+        for sd in drug_scores:
+            for jd in sd.get("jurisdiction_scores", []):
+                rows.append({
+                    "Drug_Name": sd["drug"], "Jurisdiction": jd["jurisdiction"],
+                    "Combined_Total": jd["combined_total"], "Adjusted_Count": jd["adjusted_count"],
+                    "Active_Technology_Areas": jd["active_areas"],
+                    "Active_Categories": jd["active_categories"],
+                    "Density_Interpretation": jd["density_label"],
+                    "Diversity_Interpretation": jd["diversity_label"],
+                    "Density_Score": jd["density_score"], "Diversity_Score": jd["diversity_score"],
+                    "Base_Score": jd["base_score"], "Validation_Pct": jd["validation_pct"],
+                    "Final_Score": jd["final_score"], "Score_Label": jd["final_label"],
+                    "Model_Used": "gemini-2.5-flash",
+                })
+            avg_final = sd["avg_final_score"]
+            rows.append({
+                "Drug_Name": sd["drug"], "Jurisdiction": "Final Score (Average)",
+                "Combined_Total": None, "Adjusted_Count": None,
+                "Active_Technology_Areas": None, "Active_Categories": "",
+                "Density_Interpretation": "", "Diversity_Interpretation": "",
+                "Density_Score": None, "Diversity_Score": None,
+                "Base_Score": None, "Validation_Pct": None,
+                "Final_Score": avg_final,
+                "Score_Label": THICKET_SCORE_LABELS.get(max(1, min(5, round(avg_final))), ""),
+                "Model_Used": "gemini-2.5-flash",
+            })
+        path = os.path.join(OUTPUT_DIR, "scores_gemini.json")
+        with open(path, "w") as f:
+            json.dump(rows, f, indent=2, default=str)
+        print(f"[JSON] Scores → {path} ({len(rows)} rows)")
+
 
 def _get_credentials():
     """Get credentials: use service account file if available, else default (Cloud Run)."""
@@ -1421,6 +1499,7 @@ def process_patents(skip_circumvention=False, drug_filter=None, refresh_scores=F
 
     # ── Circumvention Analysis → BigQuery ────────────────────────────────
     # Only run for drugs that were actually processed (not skipped by checkpoint)
+    circumvention_by_drug = {}
     processed_drugs = {ds["drug"] for ds in drug_scores}
     if not skip_circumvention and processed_drugs:
         if not API_KEY:
@@ -1437,7 +1516,7 @@ def process_patents(skip_circumvention=False, drug_filter=None, refresh_scores=F
                 max_patents_per_category=max_patents_per_category,
             )
             if circumvention_by_drug:
-                write_circumvention_to_bq(circumvention_by_drug)
+                write_circumvention_to_bq(circumvention_by_drug)  # noqa: F821
     elif skip_circumvention:
         print("\n⏭️  Circumvention analysis skipped (--skip-circumvention flag).")
     else:
@@ -1445,6 +1524,12 @@ def process_patents(skip_circumvention=False, drug_filter=None, refresh_scores=F
 
     # ── Score → BigQuery ──────────────────────────────────────────────────
     write_score_to_bq(drug_scores, refresh=refresh_scores)
+
+    # ── Always write local JSON (for orchestrator eval) ───────────────────
+    write_results_to_json(
+        circumvention_by_drug if not skip_circumvention else {},
+        drug_scores,
+    )
 
     print(f"\nDone! Results written to BigQuery dataset: {BQ_DATASET_ID}")
     print(f"  Tables: {BQ_CIRC_TABLE}, {BQ_SCORE_TABLE}")
