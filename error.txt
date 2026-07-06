@@ -1,1 +1,126 @@
 
+============================================================
+STEP 1: Running Gemini pipeline
+  Command: /usr/bin/python3 /home/appsupport/eval/ipd3bq__6_.py
+============================================================
+
+/home/appsupport/.local/lib/python3.10/site-packages/google/api_core/_python_version_support.py:273: FutureWarning: You are using a Python version (3.10.12) which Google will stop supporting in new releases of google.api_core once it reaches its end of life (2026-10-04). Please upgrade to the latest Python version, or at least Python 3.11, to continue receiving updates for google.api_core past that date.
+  warnings.warn(message, FutureWarning)
+/home/appsupport/.local/lib/python3.10/site-packages/google/api_core/_python_version_support.py:273: FutureWarning: You are using a Python version (3.10.12) which Google will stop supporting in new releases of google.cloud.bigquery_storage_v1 once it reaches its end of life (2026-10-04). Please upgrade to the latest Python version, or at least Python 3.11, to continue receiving updates for google.cloud.bigquery_storage_v1 past that date.
+  warnings.warn(message, FutureWarning)
+[IPD3BQ] alloydb_client located at: /home/appsupport/eval/cog/alloydb_client.py
+[BigQuery] Connecting to: cognito-prod-394707.cognito_prod_datamart.Master_LOE  (location=asia-south1)
+[BigQuery] Running ROW_NUMBER dedup query on: cognito-prod-394707.cognito_prod_datamart.Master_LOE
+Traceback (most recent call last):
+  File "/home/appsupport/eval/ipd3bq__6_.py", line 1566, in <module>
+    process_patents(
+  File "/home/appsupport/eval/ipd3bq__6_.py", line 1226, in process_patents
+    df = load_data_from_bigquery()
+  File "/home/appsupport/eval/ipd3bq__6_.py", line 113, in load_data_from_bigquery
+    df = client.query(query, location=BQ_LOCATION).to_dataframe()
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/cloud/bigquery/client.py", line 3590, in query
+    return _job_helpers.query_jobs_insert(
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/cloud/bigquery/_job_helpers.py", line 205, in query_jobs_insert
+    future = do_query()
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/api_core/retry/retry_unary.py", line 294, in retry_wrapped_func
+    return retry_target(
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/api_core/retry/retry_unary.py", line 156, in retry_target
+    next_sleep = _retry_error_helper(
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/api_core/retry/retry_base.py", line 216, in _retry_error_helper
+    raise final_exc from source_exc
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/api_core/retry/retry_unary.py", line 147, in retry_target
+    result = target()
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/cloud/bigquery/_job_helpers.py", line 151, in do_query
+    query_job._begin(retry=retry, timeout=timeout)
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/cloud/bigquery/job/query.py", line 1489, in _begin
+    super(QueryJob, self)._begin(client=client, retry=retry, timeout=timeout)
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/cloud/bigquery/job/base.py", line 825, in _begin
+    api_response = client._call_api(
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/cloud/bigquery/client.py", line 861, in _call_api
+    return call()
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/api_core/retry/retry_unary.py", line 294, in retry_wrapped_func
+    return retry_target(
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/api_core/retry/retry_unary.py", line 156, in retry_target
+    next_sleep = _retry_error_helper(
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/api_core/retry/retry_base.py", line 216, in _retry_error_helper
+    raise final_exc from source_exc
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/api_core/retry/retry_unary.py", line 147, in retry_target
+    result = target()
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/cloud/_http/__init__.py", line 494, in api_request
+    raise exceptions.from_http_response(response)
+google.api_core.exceptions.Forbidden: 403 POST https://bigquery.googleapis.com/bigquery/v2/projects/cognito-prod-394707/jobs?prettyPrint=false: Access Denied: Project cognito-prod-394707: User does not have bigquery.jobs.create permission in project cognito-prod-394707.
+
+Location: asia-south1
+Job ID: 877154bd-bca6-48db-9750-98734b3e39a8
+
+[WARN] Gemini pipeline exited with code 1
+
+============================================================
+STEP 2: Running Claude pipeline
+  Command: /usr/bin/python3 /home/appsupport/eval/ipd3bq_claude.py
+============================================================
+
+/home/appsupport/.local/lib/python3.10/site-packages/google/api_core/_python_version_support.py:273: FutureWarning: You are using a Python version (3.10.12) which Google will stop supporting in new releases of google.api_core once it reaches its end of life (2026-10-04). Please upgrade to the latest Python version, or at least Python 3.11, to continue receiving updates for google.api_core past that date.
+  warnings.warn(message, FutureWarning)
+/home/appsupport/.local/lib/python3.10/site-packages/google/api_core/_python_version_support.py:273: FutureWarning: You are using a Python version (3.10.12) which Google will stop supporting in new releases of google.cloud.bigquery_storage_v1 once it reaches its end of life (2026-10-04). Please upgrade to the latest Python version, or at least Python 3.11, to continue receiving updates for google.cloud.bigquery_storage_v1 past that date.
+  warnings.warn(message, FutureWarning)
+[IPD3BQ-CLAUDE] alloydb_client located at: /home/appsupport/eval/cog/alloydb_client.py
+[BigQuery] Connecting to: cognito-prod-394707.cognito_prod_datamart.Master_LOE  (location=asia-south1)
+Traceback (most recent call last):
+  File "/home/appsupport/eval/ipd3bq_claude.py", line 963, in <module>
+    process_patents(
+  File "/home/appsupport/eval/ipd3bq_claude.py", line 780, in process_patents
+    df = load_data_from_bigquery()
+  File "/home/appsupport/eval/ipd3bq_claude.py", line 115, in load_data_from_bigquery
+    df = client.query(query, location=BQ_LOCATION).to_dataframe()
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/cloud/bigquery/client.py", line 3590, in query
+    return _job_helpers.query_jobs_insert(
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/cloud/bigquery/_job_helpers.py", line 205, in query_jobs_insert
+    future = do_query()
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/api_core/retry/retry_unary.py", line 294, in retry_wrapped_func
+    return retry_target(
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/api_core/retry/retry_unary.py", line 156, in retry_target
+    next_sleep = _retry_error_helper(
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/api_core/retry/retry_base.py", line 216, in _retry_error_helper
+    raise final_exc from source_exc
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/api_core/retry/retry_unary.py", line 147, in retry_target
+    result = target()
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/cloud/bigquery/_job_helpers.py", line 151, in do_query
+    query_job._begin(retry=retry, timeout=timeout)
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/cloud/bigquery/job/query.py", line 1489, in _begin
+    super(QueryJob, self)._begin(client=client, retry=retry, timeout=timeout)
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/cloud/bigquery/job/base.py", line 825, in _begin
+    api_response = client._call_api(
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/cloud/bigquery/client.py", line 861, in _call_api
+    return call()
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/api_core/retry/retry_unary.py", line 294, in retry_wrapped_func
+    return retry_target(
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/api_core/retry/retry_unary.py", line 156, in retry_target
+    next_sleep = _retry_error_helper(
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/api_core/retry/retry_base.py", line 216, in _retry_error_helper
+    raise final_exc from source_exc
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/api_core/retry/retry_unary.py", line 147, in retry_target
+    result = target()
+  File "/home/appsupport/.local/lib/python3.10/site-packages/google/cloud/_http/__init__.py", line 494, in api_request
+    raise exceptions.from_http_response(response)
+google.api_core.exceptions.Forbidden: 403 POST https://bigquery.googleapis.com/bigquery/v2/projects/cognito-prod-394707/jobs?prettyPrint=false: Access Denied: Project cognito-prod-394707: User does not have bigquery.jobs.create permission in project cognito-prod-394707.
+
+Location: asia-south1
+Job ID: 007a1ee9-a4e9-45a1-ae74-7aade24e7503
+
+[WARN] Claude pipeline exited with code 1
+
+============================================================
+STEP 3: Loading results from local JSON files
+  Directory: /home/appsupport/eval/ipd3_output
+============================================================
+[WARN] File not found: /home/appsupport/eval/ipd3_output/circumvention_gemini.json
+[WARN] File not found: /home/appsupport/eval/ipd3_output/circumvention_claude.json
+[WARN] File not found: /home/appsupport/eval/ipd3_output/scores_gemini.json
+[WARN] File not found: /home/appsupport/eval/ipd3_output/scores_claude.json
+
+[ERROR] No results found. Ensure pipelines ran successfully and
+  JSON files exist in /home/appsupport/eval/ipd3_output/
+  Expected: circumvention_gemini.json, circumvention_claude.json,
+            scores_gemini.json, scores_claude.json
+Error: No data
