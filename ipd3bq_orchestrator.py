@@ -467,10 +467,12 @@ def save_eval_to_bq(rows):
     if not rows: return
     from google.cloud import bigquery
     from google.oauth2 import service_account
-    creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+    creds_path = os.environ.get("CREDENTIALS_PATH") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+    if creds_path and not os.path.isabs(creds_path):
+        creds_path = os.path.join(SCRIPT_DIR, creds_path)
     creds = (service_account.Credentials.from_service_account_file(creds_path)
              if creds_path and os.path.exists(creds_path) else None)
-    client = bigquery.Client(project=BQ_PROJECT_ID, credentials=creds)
+    client = bigquery.Client(project=BQ_PROJECT_ID, credentials=creds, location=BQ_LOCATION)
     table_ref = f"{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{EVAL_TABLE}"
     df = pd.DataFrame(rows)
     for col in df.columns:
@@ -678,6 +680,9 @@ if __name__ == "__main__":
     parser.add_argument("--refresh-scores", action="store_true")
     parser.add_argument("--rerun", action="store_true")
     parser.add_argument("--max-patents-per-category", type=int, default=10)
+    parser.add_argument("--csv-input", default=None,
+                        help="Path to local CSV/Excel export of Master_LOE table. "
+                             "Passed to both pipelines so they skip BigQuery reads.")
     args = parser.parse_args()
 
     extra = []
@@ -686,6 +691,8 @@ if __name__ == "__main__":
     if args.rerun: extra.append("--rerun")
     if args.max_patents_per_category != 10:
         extra.extend(["--max-patents-per-category", str(args.max_patents_per_category)])
+    if args.csv_input:
+        extra.extend(["--csv-input", args.csv_input])
 
     result = orchestrate(
         drug=args.drug, skip_run=args.skip_run,
