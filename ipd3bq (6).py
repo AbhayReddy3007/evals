@@ -80,35 +80,55 @@ from cog import drug_filter as glp1_universe
 BQ_PROJECT_ID  = os.getenv("BQ_PROJECT_ID", "cognito-prod-394707")
 BQ_DATASET_ID  = os.getenv("BQ_DATASET_ID", "cognito_prod_datamart")
 BQ_TABLE_ID    = os.getenv("BQ_LOE_TABLE_NAME", "Master_LOE")
-CREDENTIALS_PATH = os.getenv("CREDENTIALS_PATH") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+BQ_LOCATION    = os.getenv("BQ_LOCATION", "asia-south1")
+
+# Credentials: check CREDENTIALS_PATH first (user .env), then GOOGLE_APPLICATION_CREDENTIALS
+CREDENTIALS_PATH = os.environ.get("CREDENTIALS_PATH") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
 if CREDENTIALS_PATH and not os.path.isabs(CREDENTIALS_PATH):
     CREDENTIALS_PATH = os.path.join(SCRIPT_DIR, CREDENTIALS_PATH)
-BQ_LOCATION    = os.getenv("BQ_LOCATION", "asia-south1")
+
+# ── Output dir for local JSON (orchestrator reads from here) ─────────────────
+OUTPUT_DIR = os.getenv("IPD3_OUTPUT_DIR", os.path.join(SCRIPT_DIR, "ipd3_output"))
+
+
+def _get_credentials():
+    """Service-account credentials from CREDENTIALS_PATH, or None (falls back to ADC)."""
+    if CREDENTIALS_PATH and os.path.exists(CREDENTIALS_PATH):
+        return service_account.Credentials.from_service_account_file(CREDENTIALS_PATH)
+    return None
+
+
+def _bq_client() -> bigquery.Client:
+    """Matches generate_tolerability_report.py pattern: location in constructor."""
+    credentials = _get_credentials()
+    return bigquery.Client(
+        project=BQ_PROJECT_ID, credentials=credentials, location=BQ_LOCATION
+    )
 
 
 def load_data_from_bigquery() -> pd.DataFrame:
     """
     Loads patent data from BigQuery into a DataFrame.
-    Uses list_rows() (needs bigquery.tables.getData only — no jobs.create).
-    Dedup by Patent_Number is done in pandas instead of SQL.
+    Uses the same _bq_client() + client.query() pattern as
+    generate_tolerability_report.py.
     """
     table_ref = f"{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}"
-    print(f"[BigQuery] Reading table: {table_ref}")
+    print(f"[BigQuery] Connecting to: {table_ref}  (location={BQ_LOCATION})")
 
-    credentials = _get_credentials()
-    client = bigquery.Client(project=BQ_PROJECT_ID, credentials=credentials)
+    client = _bq_client()
 
-    print(f"[BigQuery] Using list_rows() (no query job needed)")
-    df = client.list_rows(table_ref).to_dataframe(dtypes={})
-    print(f"[BigQuery] Loaded {len(df)} raw rows")
-
-    # Dedup: keep latest row per Patent_Number (same as the original SQL ROW_NUMBER)
-    if "created_at" in df.columns and "Patent_Number" in df.columns:
-        df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
-        df = df.sort_values("created_at", ascending=False).drop_duplicates(
-            subset=["Patent_Number"], keep="first"
-        ).reset_index(drop=True)
-        print(f"[BigQuery] After dedup by Patent_Number: {len(df)} rows")
+    query = f"""
+    SELECT * EXCEPT(rn) FROM (
+        SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY Patent_Number
+            ORDER BY created_at DESC
+        ) AS rn
+        FROM `{table_ref}`
+    ) WHERE rn = 1
+    """
+    print(f"[BigQuery] Running ROW_NUMBER dedup query...")
+    df = client.query(query).to_dataframe()
+    print(f"[BigQuery] Loaded {len(df)} rows, columns: {list(df.columns)}")
 
     # BQ columns use underscores; rename to match the rest of the code (spaces)
     bq_to_code = {
@@ -863,88 +883,8 @@ def get_circumvention_for_drugs(non_blocking_df: pd.DataFrame, chroma_client,
 BQ_CIRC_TABLE   = "Circumvention_Table"
 BQ_SCORE_TABLE  = "Patent_Thicket_Score_Table"
 
-OUTPUT_DIR = os.getenv("IPD3_OUTPUT_DIR", os.path.join(SCRIPT_DIR, "ipd3_output"))
 
-
-def load_data_from_csv(csv_path: str) -> pd.DataFrame:
-    """
-    Load patent data from a local CSV or Excel file instead of BigQuery.
-    Use this when BQ access is unavailable (e.g. no bigquery.jobs.create permission).
-
-    The file should be an export of the Master_LOE table.
-    Accepts .csv, .tsv, .xlsx, or .xls.
-    """
-    ext = os.path.splitext(csv_path)[1].lower()
-    print(f"[LOCAL] Loading data from: {csv_path}")
-    if ext in (".xlsx", ".xls"):
-        df = pd.read_excel(csv_path, dtype=str)
-    elif ext == ".tsv":
-        df = pd.read_csv(csv_path, sep="\t", dtype=str)
-    else:
-        df = pd.read_csv(csv_path, dtype=str)
-
-    df.columns = df.columns.str.strip()
-    print(f"[LOCAL] Loaded {len(df)} rows, columns: {list(df.columns)}")
-
-    # If columns already use spaces (pre-renamed), skip rename.
-    # If columns use underscores (raw BQ export), apply the same rename map.
-    bq_to_code = {
-        "Drug_Name": "Drug Name", "Patent_Number": "Patent Number",
-        "Jurisdiction": "Jurisdiction", "Tag": "Tag",
-        "Blocking_Category": "Blocking Category", "Reason": "Reason",
-        "Step_1_Claim_Category": "Step 1 Claim Category",
-        "Step_2_Matched_Elements": "Step 2 Matched Elements",
-        "S2_Active_Ingredient__Form": "S2 Active Ingredient Form",
-        "S2_Formulation_Details": "S2 Formulation Details",
-        "S2_Route_of_Administration": "S2 Route of Administration",
-        "S2_Device_Description": "S2 Device Description",
-        "S2_Combination_TechProcess": "S2 Combination TechProcess",
-        "Step_3_Technical_Barrier": "Step 3 Technical Barrier",
-        "Step_3_Confidence": "Step 3 Confidence",
-        "Step_3_Evidence_Type": "Step 3 Evidence Type",
-        "Step_3_Evidence_Summary": "Step 3 Evidence Summary",
-        "Step_4_Blocking_Indicator": "Step 4 Blocking Indicator",
-        "Step_4_Confidence": "Step 4 Confidence",
-        "Step_4_Regulatory_Failure_if_Removed": "Step 4 Regulatory Failure if Removed",
-        "Step_4_Bridging_Studies_Required": "Step 4 Bridging Studies Required",
-        "Step_4_Formulation_Consistent_Across_Phases": "Step 4 Formulation Consistent Across Phases",
-        "Step_4_Reason": "Step 4 Reason",
-        "Step_5_Novel__Difficult": "Step 5 Novel Difficult",
-        "Step_5_Novelty_Signal": "Step 5 Novelty Signal",
-        "Step_5_FirstinClass": "Step 5 FirstinClass",
-        "Step_5_Prior_Failed_Attempts": "Step 5 Prior Failed Attempts",
-        "Step_5_Complex_Implementation": "Step 5 Complex Implementation",
-        "Step_5_Confidence": "Step 5 Confidence",
-        "Step_5_Reason": "Step 5 Reason",
-        "Filing_Date": "Filing Date", "Grant_Date": "Grant Date",
-        "PTE_months": "PTE months", "Pediatric_Exclusivity": "Pediatric Exclusivity",
-        "Phase": "Phase", "Launch_Date": "Launch Date",
-        "Approval_Date": "Approval Date", "Approval_Date_Source": "Approval Date Source",
-        "Est_Approval_Year": "Est Approval Year",
-        "Exclusivity_Year": "Exclusivity Year",
-        "Controlling_Patent_Expiry_Year": "Controlling Patent Expiry Year",
-        "Years_to_Entry": "Years to Entry",
-        "Avg_Years_to_Entry": "Avg Years to Entry",
-        "Score": "Score", "Avg_Years_to_Entry_US__EP": "Avg Years to Entry US EP",
-        "IP_Dimension_1_Score": "IP Dimension 1 Score",
-        "Source_File": "Source File", "Type": "Type",
-        "No_Of_Forecasted_Patents": "No Of Forecasted Patents",
-    }
-    # Only rename columns that exist and still use underscores
-    rename_map = {k: v for k, v in bq_to_code.items() if k in df.columns}
-    if rename_map:
-        df.rename(columns=rename_map, inplace=True)
-        print(f"[LOCAL] Renamed {len(rename_map)} underscore columns to space-separated")
-
-    # Dedup by Patent Number (simulates the ROW_NUMBER dedup in the BQ query)
-    if "Patent Number" in df.columns and "created_at" in df.columns:
-        df = df.sort_values("created_at", ascending=False).drop_duplicates("Patent Number", keep="first")
-        print(f"[LOCAL] After dedup: {len(df)} rows")
-    elif "Patent Number" in df.columns:
-        df = df.drop_duplicates("Patent Number", keep="first")
-        print(f"[LOCAL] After dedup (no created_at): {len(df)} rows")
-
-    return df
+# _get_credentials() and _bq_client() are defined above (near load_data_from_bigquery)
 
 
 def write_results_to_json(circumvention_by_drug: dict, drug_scores: list):
@@ -1004,11 +944,6 @@ def write_results_to_json(circumvention_by_drug: dict, drug_scores: list):
             avg_final = sd["avg_final_score"]
             rows.append({
                 "Drug_Name": sd["drug"], "Jurisdiction": "Final Score (Average)",
-                "Combined_Total": None, "Adjusted_Count": None,
-                "Active_Technology_Areas": None, "Active_Categories": "",
-                "Density_Interpretation": "", "Diversity_Interpretation": "",
-                "Density_Score": None, "Diversity_Score": None,
-                "Base_Score": None, "Validation_Pct": None,
                 "Final_Score": avg_final,
                 "Score_Label": THICKET_SCORE_LABELS.get(max(1, min(5, round(avg_final))), ""),
                 "Model_Used": "gemini-2.5-flash",
@@ -1017,18 +952,6 @@ def write_results_to_json(circumvention_by_drug: dict, drug_scores: list):
         with open(path, "w") as f:
             json.dump(rows, f, indent=2, default=str)
         print(f"[JSON] Scores → {path} ({len(rows)} rows)")
-
-
-def _get_credentials():
-    """Get credentials: use service account file if available, else default (Cloud Run)."""
-    if CREDENTIALS_PATH and os.path.exists(CREDENTIALS_PATH):
-        return service_account.Credentials.from_service_account_file(CREDENTIALS_PATH)
-    return None  # Use ADC (Application Default Credentials)
-
-def _get_bq_client() -> bigquery.Client:
-    """Return an authenticated BigQuery client."""
-    credentials = _get_credentials()
-    return bigquery.Client(project=BQ_PROJECT_ID, credentials=credentials)
 
 
 def write_circumvention_to_bq(circumvention_by_drug: dict):
@@ -1104,7 +1027,7 @@ def write_circumvention_to_bq(circumvention_by_drug: dict):
 
     df_circ = pd.DataFrame(rows)
     table_ref = f"{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_CIRC_TABLE}"
-    client = _get_bq_client()
+    client = _bq_client()
 
     # Align dtypes to match BQ schema
     try:
@@ -1222,7 +1145,7 @@ def write_score_to_bq(drug_scores: list, refresh=False):
 
     df_score = pd.DataFrame(rows)
     table_ref = f"{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_SCORE_TABLE}"
-    client = _get_bq_client()
+    client = _bq_client()
 
     # Align dtypes to match BQ schema — read the table schema and cast accordingly
     try:
@@ -1295,12 +1218,9 @@ def write_score_to_bq(drug_scores: list, refresh=False):
 EXCLUDED_CATEGORIES = {"Composition Of Matter"}
 
 def process_patents(skip_circumvention=False, drug_filter=None, refresh_scores=False,
-                    rerun=False, max_patents_per_category=10, csv_input=None, no_bq=False):
-    # ── Load data ─────────────────────────────────────────────────────────
-    if csv_input:
-        df = load_data_from_csv(csv_input)
-    else:
-        df = load_data_from_bigquery()
+                    rerun=False, max_patents_per_category=10, no_bq=False):
+    # ── Load from BigQuery ────────────────────────────────────────────────
+    df = load_data_from_bigquery()
     df.columns = df.columns.str.strip()
     df = df.drop_duplicates()
 
@@ -1421,7 +1341,7 @@ def process_patents(skip_circumvention=False, drug_filter=None, refresh_scores=F
     # be skipped forever on every future run. We verify against both tables.
     if completed_drugs and not skip_circumvention:
         try:
-            client = _get_bq_client()
+            client = _bq_client()
             circ_table_ref  = f"{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_CIRC_TABLE}"
             score_table_ref = f"{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_SCORE_TABLE}"
 
@@ -1607,7 +1527,7 @@ def process_patents(skip_circumvention=False, drug_filter=None, refresh_scores=F
     print(f"\nDone!")
     if not no_bq:
         print(f"  BQ dataset: {BQ_DATASET_ID}  |  Tables: {BQ_CIRC_TABLE}, {BQ_SCORE_TABLE}")
-    print(f"  JSON output: {OUTPUT_DIR}/")
+    print(f"  JSON: {OUTPUT_DIR}/")
     print(f"  {len(non_blocking)} NON-BLOCKING rows | {len(drugs)} drug(s): {', '.join(str(d) for d in drugs)}")
     print(f"  {len(all_categories)} Step 1 Claim Categories: {', '.join(str(c) for c in all_categories)}")
 
@@ -1637,10 +1557,6 @@ if __name__ == "__main__":
         help="Max patents per category for circumvention analysis (default: 10).",
     )
     parser.add_argument(
-        "--csv-input", default=None,
-        help="Load data from a local CSV/Excel file instead of BigQuery.",
-    )
-    parser.add_argument(
         "--no-bq", action="store_true",
         help="Skip all BigQuery writes; output local JSON only.",
     )
@@ -1652,6 +1568,5 @@ if __name__ == "__main__":
         refresh_scores=args.refresh_scores or args.rerun,
         rerun=args.rerun,
         max_patents_per_category=args.max_patents_per_category,
-        csv_input=args.csv_input,
         no_bq=args.no_bq,
     )
