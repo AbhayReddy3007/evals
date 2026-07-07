@@ -55,6 +55,13 @@ BQ_LOCATION   = os.getenv("BQ_LOCATION", "asia-south1")
 GCP_REGION    = os.getenv("GCP_REGION", "us-east5")
 PROJECT_ID    = os.getenv("BQ_PROJECT_ID", "cognito-prod-394707")
 
+CREDENTIALS_PATH = os.environ.get("CREDENTIALS_PATH") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+if CREDENTIALS_PATH and not os.path.isabs(CREDENTIALS_PATH):
+    CREDENTIALS_PATH = os.path.join(SCRIPT_DIR, CREDENTIALS_PATH)
+
+GCS_BUCKET    = os.getenv("GCS_BUCKET", "cognito-gcs")
+GCS_BASE_PATH = os.getenv("GCS_EVAL_PATH", "Cognito_new/eval_reports")
+
 CLAUDE_MODEL   = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 MAX_WORKERS    = 6
 LLM_MAX_TOKENS = 8192
@@ -63,9 +70,6 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.getenv("IPD3_OUTPUT_DIR", os.path.join(SCRIPT_DIR, "ipd3_output"))
 
 EVAL_TABLE = "IPD3_Eval_Table"
-
-GCS_BUCKET = os.getenv("GCS_BUCKET", "")            # e.g. "my-bucket-name" (no gs:// prefix)
-GCS_FOLDER = os.getenv("GCS_EVAL_FOLDER", "eval")   # folder/prefix inside the bucket
 
 
 # ── Claude Client ─────────────────────────────────────────────────────────────
@@ -282,16 +286,29 @@ Summary: {claude_summary}
 --- END CLAUDE ---
 
 Evaluate both outputs on these dimensions:
-1. Accuracy: Are claim limitations and strategies technically/legally sound?
-2. Completeness: Does the analysis cover all viable circumvention approaches?
-3. Feasibility Assessment: Are feasibility ratings well-justified?
-4. Regulatory Viability: Are 505(b)(2) pathways realistic?
-5. Prior Art Quality: Are FDA/Orange Book/literature references relevant?
+1. **Faithfulness**: Are the claims, limitations, and strategies grounded in the actual
+   patent data provided (excerpts, patent numbers, known prior art)? Does the output
+   avoid hallucinated references, fabricated patent details, or unsupported assertions?
+   Score LOW if the system invents specific patent claims, cites non-existent FDA approvals,
+   or presents fabricated prior art as fact.
+2. **Relevance**: Is the analysis specifically targeted to this drug and patent category?
+   Do the identified claim limitations and design-around strategies actually address the
+   patents listed, rather than providing generic boilerplate? Score LOW if the output
+   could apply to any drug/category interchangeably without meaningful customisation.
+3. **Accuracy**: Are claim limitations and strategies technically/legally sound?
+4. **Completeness**: Does the analysis cover all viable circumvention approaches?
+5. **Feasibility Assessment**: Are feasibility ratings well-justified?
+6. **Regulatory Viability**: Are 505(b)(2) pathways realistic?
+7. **Prior Art Quality**: Are FDA/Orange Book/literature references relevant and specific?
 
 Respond ONLY with valid JSON:
 {{
   "agreement_level": "<full|partial|none>",
   "difficulty_agreement": <true or false>,
+  "gemini_faithfulness_score": <integer 1-5, where 5=fully grounded, 1=mostly hallucinated>,
+  "claude_faithfulness_score": <integer 1-5>,
+  "gemini_relevance_score": <integer 1-5, where 5=highly specific to this drug/category, 1=generic boilerplate>,
+  "claude_relevance_score": <integer 1-5>,
   "gemini_accuracy_score": <integer 1-5>,
   "claude_accuracy_score": <integer 1-5>,
   "gemini_completeness_score": <integer 1-5>,
@@ -302,6 +319,8 @@ Respond ONLY with valid JSON:
   "claude_regulatory_score": <integer 1-5>,
   "gemini_prior_art_score": <integer 1-5>,
   "claude_prior_art_score": <integer 1-5>,
+  "faithfulness_notes": "<1-2 sentences: which system had more grounded/hallucinated content and why>",
+  "relevance_notes": "<1-2 sentences: which system was more specific vs generic and why>",
   "preferred_system": "<gemini|claude|tie>",
   "preference_reason": "<1-2 sentences>",
   "discrepancy_explanation": "<1-2 sentences or null>",
@@ -337,10 +356,23 @@ Diversity Interpretation: {claude_Diversity_Interpretation}
 The thicket scoring formula is deterministic. Differences indicate the underlying
 patent classification or filtering diverged.
 
+Evaluate on:
+1. **Faithfulness**: Are the score interpretations (labels, density/diversity readings)
+   consistent with the numeric values shown? Does either system misrepresent what the
+   numbers mean?
+2. **Relevance**: Are the density/diversity interpretations specific to this drug and
+   jurisdiction, or are they generic descriptions that ignore the actual patent landscape?
+
 Respond ONLY with valid JSON:
 {{
   "scores_match": <true or false>,
   "final_score_delta": <integer: gemini - claude>,
+  "gemini_faithfulness_score": <integer 1-5, where 5=interpretations fully match the numbers>,
+  "claude_faithfulness_score": <integer 1-5>,
+  "gemini_relevance_score": <integer 1-5, where 5=interpretation is specific to this drug/jurisdiction>,
+  "claude_relevance_score": <integer 1-5>,
+  "faithfulness_notes": "<1 sentence on whether labels match numeric scores>",
+  "relevance_notes": "<1 sentence on specificity of interpretations>",
   "discrepancy_explanation": "<explanation>",
   "data_consistency_flag": "<consistent|minor_divergence|major_divergence>",
   "recommended_final_score": <integer 1-5>,
@@ -362,12 +394,20 @@ Summary statistics:
 - Tied: {tied}
 - Average Gemini accuracy: {avg_gemini_accuracy}
 - Average Claude accuracy: {avg_claude_accuracy}
+- Average Gemini faithfulness: {avg_gemini_faithfulness}
+- Average Claude faithfulness: {avg_claude_faithfulness}
+- Average Gemini relevance: {avg_gemini_relevance}
+- Average Claude relevance: {avg_claude_relevance}
 - Score agreement rate: {score_agreement_pct}%
 
 Respond ONLY with valid JSON:
 {{
   "overall_preferred_system": "<gemini|claude|tie>",
   "confidence": "<high|medium|low>",
+  "faithfulness_winner": "<gemini|claude|tie>",
+  "faithfulness_summary": "<1-2 sentences comparing which system's outputs were more grounded in source data vs hallucinated>",
+  "relevance_winner": "<gemini|claude|tie>",
+  "relevance_summary": "<1-2 sentences comparing which system was more specific to the drug/patents vs generic>",
   "key_strengths_gemini": ["<strength 1>", "<strength 2>"],
   "key_strengths_claude": ["<strength 1>", "<strength 2>"],
   "key_weaknesses_gemini": ["<weakness 1>"],
@@ -439,17 +479,27 @@ def run_overall_synthesis(client, drug, circ_evals, score_evals):
     gemini_pref = sum(1 for e in circ_evals if e.get("preferred_system") == "gemini")
     claude_pref = sum(1 for e in circ_evals if e.get("preferred_system") == "claude")
     tied = sum(1 for e in circ_evals if e.get("preferred_system") == "tie")
-    gemini_acc = [e.get("gemini_accuracy_score", 0) for e in circ_evals if e.get("gemini_accuracy_score")]
-    claude_acc = [e.get("claude_accuracy_score", 0) for e in circ_evals if e.get("claude_accuracy_score")]
-    avg_g = round(sum(gemini_acc) / len(gemini_acc), 1) if gemini_acc else 0
-    avg_c = round(sum(claude_acc) / len(claude_acc), 1) if claude_acc else 0
+
+    def _avg(evals, key):
+        vals = [e.get(key, 0) for e in evals if e.get(key)]
+        return round(sum(vals) / len(vals), 1) if vals else 0
+
+    avg_g_acc = _avg(circ_evals, "gemini_accuracy_score")
+    avg_c_acc = _avg(circ_evals, "claude_accuracy_score")
+    avg_g_faith = _avg(circ_evals, "gemini_faithfulness_score")
+    avg_c_faith = _avg(circ_evals, "claude_faithfulness_score")
+    avg_g_rel = _avg(circ_evals, "gemini_relevance_score")
+    avg_c_rel = _avg(circ_evals, "claude_relevance_score")
+
     score_matches = sum(1 for e in score_evals if e.get("scores_match"))
     score_total = len(score_evals) or 1
 
     prompt = OVERALL_SYNTHESIS_PROMPT.format(
         drug=drug, num_categories=len(circ_evals),
         gemini_preferred=gemini_pref, claude_preferred=claude_pref, tied=tied,
-        avg_gemini_accuracy=avg_g, avg_claude_accuracy=avg_c,
+        avg_gemini_accuracy=avg_g_acc, avg_claude_accuracy=avg_c_acc,
+        avg_gemini_faithfulness=avg_g_faith, avg_claude_faithfulness=avg_c_faith,
+        avg_gemini_relevance=avg_g_rel, avg_claude_relevance=avg_c_rel,
         score_agreement_pct=round(score_matches / score_total * 100, 1),
     )
     return _call_claude(client, prompt)
@@ -457,57 +507,57 @@ def run_overall_synthesis(client, drug, circ_evals, score_evals):
 
 # ── Save Results ──────────────────────────────────────────────────────────────
 
+def _get_credentials():
+    """Service-account credentials matching generate_tolerability_report.py pattern."""
+    if CREDENTIALS_PATH and os.path.exists(CREDENTIALS_PATH):
+        from google.oauth2 import service_account
+        return service_account.Credentials.from_service_account_file(CREDENTIALS_PATH)
+    return None
+
+
+def upload_to_gcs(local_path: str) -> str:
+    """Upload a file to GCS and return the gs:// URI."""
+    from google.cloud import storage as gcs_storage
+
+    credentials = _get_credentials()
+    client = gcs_storage.Client(project=BQ_PROJECT_ID, credentials=credentials)
+    bucket = client.bucket(GCS_BUCKET)
+
+    filename = os.path.basename(local_path)
+    blob_name = f"{GCS_BASE_PATH}/{filename}"
+    gcs_uri = f"gs://{GCS_BUCKET}/{blob_name}"
+
+    print(f"[GCS] Uploading → {gcs_uri}")
+    bucket.blob(blob_name).upload_from_filename(
+        local_path,
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    return gcs_uri
+
+
 def save_eval_to_excel(rows, drug=None):
+    """Save eval results to Excel locally, then upload to GCS."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     fname = os.path.join(OUTPUT_DIR, f"ipd3_eval_{drug or 'all'}_{ts}.xlsx")
     pd.DataFrame(rows).to_excel(fname, index=False)
     print(f"[EXCEL] Eval results → {fname}")
+
+    # Upload to GCS
+    try:
+        gcs_uri = upload_to_gcs(fname)
+        print(f"[GCS] {gcs_uri}")
+    except Exception as e:
+        print(f"[WARN] GCS upload failed: {e} — file saved locally at {fname}")
+
     return fname
-
-
-def upload_to_gcs(local_path, bucket_name=None, folder=None):
-    """Upload a local file to gs://{bucket_name}/{folder}/{basename}."""
-    bucket_name = bucket_name or GCS_BUCKET
-    folder = folder if folder is not None else GCS_FOLDER
-    if not bucket_name:
-        print("[GCS] Skipped — no bucket configured (set GCS_BUCKET or pass --gcs-bucket)")
-        return None
-    if not os.path.exists(local_path):
-        print(f"[GCS] Skipped — local file not found: {local_path}")
-        return None
-
-    from google.cloud import storage
-    from google.oauth2 import service_account
-
-    creds_path = os.environ.get("CREDENTIALS_PATH") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
-    if creds_path and not os.path.isabs(creds_path):
-        creds_path = os.path.join(SCRIPT_DIR, creds_path)
-    creds = (service_account.Credentials.from_service_account_file(creds_path)
-             if creds_path and os.path.exists(creds_path) else None)
-
-    client = storage.Client(project=PROJECT_ID, credentials=creds) if creds else storage.Client(project=PROJECT_ID)
-    bucket = client.bucket(bucket_name)
-
-    blob_name = f"{folder.strip('/')}/{os.path.basename(local_path)}" if folder else os.path.basename(local_path)
-    blob = bucket.blob(blob_name)
-    blob.upload_from_filename(local_path)
-
-    gcs_uri = f"gs://{bucket_name}/{blob_name}"
-    print(f"[GCS] Uploaded → {gcs_uri}")
-    return gcs_uri
 
 
 def save_eval_to_bq(rows):
     if not rows: return
     from google.cloud import bigquery
-    from google.oauth2 import service_account
-    creds_path = os.environ.get("CREDENTIALS_PATH") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
-    if creds_path and not os.path.isabs(creds_path):
-        creds_path = os.path.join(SCRIPT_DIR, creds_path)
-    creds = (service_account.Credentials.from_service_account_file(creds_path)
-             if creds_path and os.path.exists(creds_path) else None)
-    client = bigquery.Client(project=BQ_PROJECT_ID, credentials=creds, location=BQ_LOCATION)
+    credentials = _get_credentials()
+    client = bigquery.Client(project=BQ_PROJECT_ID, credentials=credentials, location=BQ_LOCATION)
     table_ref = f"{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{EVAL_TABLE}"
     df = pd.DataFrame(rows)
     for col in df.columns:
@@ -525,8 +575,7 @@ def save_eval_to_bq(rows):
 # ── Main Orchestrator ─────────────────────────────────────────────────────────
 
 def orchestrate(drug=None, skip_run=False, skip_gemini=False, skip_claude=False,
-                to_bq=False, extra_args=None, no_bq_pipelines=False,
-                gcs_bucket=None, gcs_folder=None, no_gcs=False):
+                to_bq=False, extra_args=None, no_bq_pipelines=False):
     start = time.time()
 
     print("=" * 70)
@@ -534,14 +583,6 @@ def orchestrate(drug=None, skip_run=False, skip_gemini=False, skip_claude=False,
     print(f"  Drug filter : {drug or 'ALL'}")
     print(f"  Judge model : {CLAUDE_MODEL}")
     print(f"  Eval output : {'BQ + Excel' if to_bq else 'Excel only'}")
-    _bucket = gcs_bucket or GCS_BUCKET
-    _folder = gcs_folder if gcs_folder is not None else GCS_FOLDER
-    if no_gcs:
-        print(f"  GCS upload  : disabled (--no-gcs)")
-    elif _bucket:
-        print(f"  GCS upload  : gs://{_bucket}/{_folder.strip('/')}/")
-    else:
-        print(f"  GCS upload  : skipped (no bucket configured — set GCS_BUCKET env var or --gcs-bucket)")
     print(f"  JSON dir    : {OUTPUT_DIR}")
     print("=" * 70)
 
@@ -676,12 +717,25 @@ def orchestrate(drug=None, skip_run=False, skip_gemini=False, skip_claude=False,
     tied = sum(1 for e in circ_evals if e.get("preferred_system") == "tie")
     score_matches = sum(1 for e in score_evals if e.get("scores_match"))
 
+    def _avg(evals, key):
+        vals = [e.get(key, 0) for e in evals if e.get(key)]
+        return round(sum(vals) / len(vals), 1) if vals else 0
+
     print(f"\n{'='*60}")
     print("EVALUATION SUMMARY")
     print(f"  Circumvention categories : {len(circ_evals)}")
     print(f"    Gemini preferred       : {gemini_pref}")
     print(f"    Claude preferred       : {claude_pref}")
     print(f"    Tied                   : {tied}")
+    print(f"  Faithfulness (avg)")
+    print(f"    Gemini                 : {_avg(circ_evals, 'gemini_faithfulness_score')}")
+    print(f"    Claude                 : {_avg(circ_evals, 'claude_faithfulness_score')}")
+    print(f"  Relevance (avg)")
+    print(f"    Gemini                 : {_avg(circ_evals, 'gemini_relevance_score')}")
+    print(f"    Claude                 : {_avg(circ_evals, 'claude_relevance_score')}")
+    print(f"  Accuracy (avg)")
+    print(f"    Gemini                 : {_avg(circ_evals, 'gemini_accuracy_score')}")
+    print(f"    Claude                 : {_avg(circ_evals, 'claude_accuracy_score')}")
     print(f"  Score rows evaluated     : {len(score_evals)}")
     print(f"    Scores match           : {score_matches}/{len(score_evals)}")
     print(f"  Drugs evaluated          : {len(drugs_evaluated)}")
@@ -690,12 +744,7 @@ def orchestrate(drug=None, skip_run=False, skip_gemini=False, skip_claude=False,
     print("=" * 60)
 
     # ── Save ──────────────────────────────────────────────────────────────
-    excel_path = save_eval_to_excel(all_output_rows, drug)
-    if not no_gcs:
-        try:
-            upload_to_gcs(excel_path, bucket_name=gcs_bucket, folder=gcs_folder)
-        except Exception as e:
-            print(f"[GCS] Upload failed ({e}) — results already saved locally to Excel")
+    save_eval_to_excel(all_output_rows, drug)
     if to_bq:
         try:
             save_eval_to_bq(all_output_rows)
@@ -732,12 +781,6 @@ if __name__ == "__main__":
     parser.add_argument("--csv-input", default=None,
                         help="Path to local CSV/Excel export of Master_LOE table. "
                              "Passed to both pipelines so they skip BigQuery reads.")
-    parser.add_argument("--gcs-bucket", default=None,
-                        help="GCS bucket to upload the Excel eval output to (overrides GCS_BUCKET env var)")
-    parser.add_argument("--gcs-folder", default=None,
-                        help="Folder/prefix within the bucket (default: 'eval', overrides GCS_EVAL_FOLDER env var)")
-    parser.add_argument("--no-gcs", action="store_true",
-                        help="Skip uploading the Excel eval output to GCS")
     args = parser.parse_args()
 
     extra = []
@@ -754,8 +797,6 @@ if __name__ == "__main__":
         skip_gemini=args.skip_gemini, skip_claude=args.skip_claude,
         to_bq=args.to_bq, extra_args=extra or None,
         no_bq_pipelines=args.no_bq,
-        gcs_bucket=args.gcs_bucket, gcs_folder=args.gcs_folder,
-        no_gcs=args.no_gcs,
     )
     if "error" in result:
         print(f"Error: {result['error']}")
