@@ -64,6 +64,9 @@ OUTPUT_DIR = os.getenv("IPD3_OUTPUT_DIR", os.path.join(SCRIPT_DIR, "ipd3_output"
 
 EVAL_TABLE = "IPD3_Eval_Table"
 
+GCS_BUCKET = os.getenv("GCS_BUCKET", "")            # e.g. "my-bucket-name" (no gs:// prefix)
+GCS_FOLDER = os.getenv("GCS_EVAL_FOLDER", "eval")   # folder/prefix inside the bucket
+
 
 # ── Claude Client ─────────────────────────────────────────────────────────────
 
@@ -463,6 +466,38 @@ def save_eval_to_excel(rows, drug=None):
     return fname
 
 
+def upload_to_gcs(local_path, bucket_name=None, folder=None):
+    """Upload a local file to gs://{bucket_name}/{folder}/{basename}."""
+    bucket_name = bucket_name or GCS_BUCKET
+    folder = folder if folder is not None else GCS_FOLDER
+    if not bucket_name:
+        print("[GCS] Skipped — no bucket configured (set GCS_BUCKET or pass --gcs-bucket)")
+        return None
+    if not os.path.exists(local_path):
+        print(f"[GCS] Skipped — local file not found: {local_path}")
+        return None
+
+    from google.cloud import storage
+    from google.oauth2 import service_account
+
+    creds_path = os.environ.get("CREDENTIALS_PATH") or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+    if creds_path and not os.path.isabs(creds_path):
+        creds_path = os.path.join(SCRIPT_DIR, creds_path)
+    creds = (service_account.Credentials.from_service_account_file(creds_path)
+             if creds_path and os.path.exists(creds_path) else None)
+
+    client = storage.Client(project=PROJECT_ID, credentials=creds) if creds else storage.Client(project=PROJECT_ID)
+    bucket = client.bucket(bucket_name)
+
+    blob_name = f"{folder.strip('/')}/{os.path.basename(local_path)}" if folder else os.path.basename(local_path)
+    blob = bucket.blob(blob_name)
+    blob.upload_from_filename(local_path)
+
+    gcs_uri = f"gs://{bucket_name}/{blob_name}"
+    print(f"[GCS] Uploaded → {gcs_uri}")
+    return gcs_uri
+
+
 def save_eval_to_bq(rows):
     if not rows: return
     from google.cloud import bigquery
@@ -490,7 +525,8 @@ def save_eval_to_bq(rows):
 # ── Main Orchestrator ─────────────────────────────────────────────────────────
 
 def orchestrate(drug=None, skip_run=False, skip_gemini=False, skip_claude=False,
-                to_bq=False, extra_args=None, no_bq_pipelines=False):
+                to_bq=False, extra_args=None, no_bq_pipelines=False,
+                gcs_bucket=None, gcs_folder=None, no_gcs=False):
     start = time.time()
 
     print("=" * 70)
@@ -498,6 +534,14 @@ def orchestrate(drug=None, skip_run=False, skip_gemini=False, skip_claude=False,
     print(f"  Drug filter : {drug or 'ALL'}")
     print(f"  Judge model : {CLAUDE_MODEL}")
     print(f"  Eval output : {'BQ + Excel' if to_bq else 'Excel only'}")
+    _bucket = gcs_bucket or GCS_BUCKET
+    _folder = gcs_folder if gcs_folder is not None else GCS_FOLDER
+    if no_gcs:
+        print(f"  GCS upload  : disabled (--no-gcs)")
+    elif _bucket:
+        print(f"  GCS upload  : gs://{_bucket}/{_folder.strip('/')}/")
+    else:
+        print(f"  GCS upload  : skipped (no bucket configured — set GCS_BUCKET env var or --gcs-bucket)")
     print(f"  JSON dir    : {OUTPUT_DIR}")
     print("=" * 70)
 
@@ -646,7 +690,12 @@ def orchestrate(drug=None, skip_run=False, skip_gemini=False, skip_claude=False,
     print("=" * 60)
 
     # ── Save ──────────────────────────────────────────────────────────────
-    save_eval_to_excel(all_output_rows, drug)
+    excel_path = save_eval_to_excel(all_output_rows, drug)
+    if not no_gcs:
+        try:
+            upload_to_gcs(excel_path, bucket_name=gcs_bucket, folder=gcs_folder)
+        except Exception as e:
+            print(f"[GCS] Upload failed ({e}) — results already saved locally to Excel")
     if to_bq:
         try:
             save_eval_to_bq(all_output_rows)
@@ -683,6 +732,12 @@ if __name__ == "__main__":
     parser.add_argument("--csv-input", default=None,
                         help="Path to local CSV/Excel export of Master_LOE table. "
                              "Passed to both pipelines so they skip BigQuery reads.")
+    parser.add_argument("--gcs-bucket", default=None,
+                        help="GCS bucket to upload the Excel eval output to (overrides GCS_BUCKET env var)")
+    parser.add_argument("--gcs-folder", default=None,
+                        help="Folder/prefix within the bucket (default: 'eval', overrides GCS_EVAL_FOLDER env var)")
+    parser.add_argument("--no-gcs", action="store_true",
+                        help="Skip uploading the Excel eval output to GCS")
     args = parser.parse_args()
 
     extra = []
@@ -699,6 +754,8 @@ if __name__ == "__main__":
         skip_gemini=args.skip_gemini, skip_claude=args.skip_claude,
         to_bq=args.to_bq, extra_args=extra or None,
         no_bq_pipelines=args.no_bq,
+        gcs_bucket=args.gcs_bucket, gcs_folder=args.gcs_folder,
+        no_gcs=args.no_gcs,
     )
     if "error" in result:
         print(f"Error: {result['error']}")
