@@ -405,6 +405,8 @@ def get_chroma_clients():
     return [_alloydb_client]
 
 def collection_name(drug: str) -> str:
+    if glp1_universe:
+        return f"patents_{glp1_universe.safe_collection_name(drug)}"
     return f"patents_{drug.strip().replace(' ', '_')}"
 
 def fetch_relevant_chunks(client, drug, source_file, sections, top_k=12):
@@ -452,7 +454,30 @@ def fetch_relevant_chunks(client, drug, source_file, sections, top_k=12):
     except Exception as e:
         print(f"    [WARN] Could not query collection '{primary_coll_name}': {e}")
 
-    print(f"    [INFO] '{exact_filename}' not found in '{primary_coll_name}' — no fallback scan.")
+    print(f"    [INFO] '{exact_filename}' not found in '{primary_coll_name}' — checking filename→collection map...")
+
+    # ── Fallback: use pre-built filename→collection map (single SQL query,
+    #    cached for the entire run) instead of scanning every collection.
+    try:
+        from cog.indexer import get_filename_collection_map_sync
+
+        fmap = get_filename_collection_map_sync()
+        target_col_name = fmap.get(exact_filename)
+
+        if target_col_name and target_col_name != primary_coll_name:
+            try:
+                target_coll = _alloydb_client.get_collection(target_col_name)
+                docs = _query_collection(target_coll)
+                if docs:
+                    print(f"    [INFO] Found {len(docs)} chunks in mapped collection "
+                          f"'{target_col_name}' for '{exact_filename}'")
+                    return _rank_and_slice(docs)
+            except Exception as e:
+                print(f"    [WARN] Could not query mapped collection '{target_col_name}': {e}")
+    except ImportError:
+        print("    [WARN] cog.indexer not available — filename map fallback disabled.")
+
+    print(f"    [WARN] No chunks found for '{exact_filename}' in any collection.")
     return []
 
 
