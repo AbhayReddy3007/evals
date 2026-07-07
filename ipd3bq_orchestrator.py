@@ -66,7 +66,7 @@ GCS_BASE_PATH = os.getenv("GCS_EVAL_PATH", "Cognito_new/eval_reports")
 
 CLAUDE_MODEL   = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 MAX_WORKERS    = 6
-LLM_MAX_TOKENS = 8192
+LLM_MAX_TOKENS = 16384
 
 OUTPUT_DIR = os.getenv("IPD3_OUTPUT_DIR", os.path.join(SCRIPT_DIR, "ipd3_output"))
 
@@ -287,29 +287,36 @@ Summary: {claude_summary}
 --- END CLAUDE ---
 
 Evaluate both outputs on these dimensions:
-1. **Faithfulness**: Are the claims, limitations, and strategies grounded in the actual
-   patent data provided (excerpts, patent numbers, known prior art)? Does the output
-   avoid hallucinated references, fabricated patent details, or unsupported assertions?
-   Score LOW if the system invents specific patent claims, cites non-existent FDA approvals,
-   or presents fabricated prior art as fact.
+1. **Faithfulness**: Does the output avoid hallucinated references, fabricated patent
+   details, or unsupported assertions? Score LOW if the system invents specific patent
+   claims, cites non-existent FDA approvals, or presents fabricated prior art as fact.
 2. **Relevance**: Is the analysis specifically targeted to this drug and patent category?
    Do the identified claim limitations and design-around strategies actually address the
    patents listed, rather than providing generic boilerplate? Score LOW if the output
    could apply to any drug/category interchangeably without meaningful customisation.
-3. **Accuracy**: Are claim limitations and strategies technically/legally sound?
-4. **Completeness**: Does the analysis cover all viable circumvention approaches?
-5. **Feasibility Assessment**: Are feasibility ratings well-justified?
-6. **Regulatory Viability**: Are 505(b)(2) pathways realistic?
-7. **Prior Art Quality**: Are FDA/Orange Book/literature references relevant and specific?
+3. **Grounding**: Can the key claims, limitations, and strategies in the output be traced
+   back to the specific patent excerpts / source data provided in the input? For each
+   strategy or limitation stated, is there a clear link to a passage in the patent chunks?
+   Score LOW if the output makes assertions that cannot be mapped to any provided source
+   text, even if the assertions happen to be factually plausible.
+   NOTE: Faithfulness asks "did it make things up?"; Grounding asks "did it use the source
+   data provided, and can we trace its claims back to those sources?".
+4. **Accuracy**: Are claim limitations and strategies technically/legally sound?
+5. **Completeness**: Does the analysis cover all viable circumvention approaches?
+6. **Feasibility Assessment**: Are feasibility ratings well-justified?
+7. **Regulatory Viability**: Are 505(b)(2) pathways realistic?
+8. **Prior Art Quality**: Are FDA/Orange Book/literature references relevant and specific?
 
 Respond ONLY with valid JSON:
 {{
   "agreement_level": "<full|partial|none>",
   "difficulty_agreement": <true or false>,
-  "gemini_faithfulness_score": <integer 1-5, where 5=fully grounded, 1=mostly hallucinated>,
+  "gemini_faithfulness_score": <integer 1-5, where 5=no hallucinations, 1=mostly hallucinated>,
   "claude_faithfulness_score": <integer 1-5>,
   "gemini_relevance_score": <integer 1-5, where 5=highly specific to this drug/category, 1=generic boilerplate>,
   "claude_relevance_score": <integer 1-5>,
+  "gemini_grounding_score": <integer 1-5, where 5=every claim traceable to source data, 1=no link to sources>,
+  "claude_grounding_score": <integer 1-5>,
   "gemini_accuracy_score": <integer 1-5>,
   "claude_accuracy_score": <integer 1-5>,
   "gemini_completeness_score": <integer 1-5>,
@@ -320,8 +327,9 @@ Respond ONLY with valid JSON:
   "claude_regulatory_score": <integer 1-5>,
   "gemini_prior_art_score": <integer 1-5>,
   "claude_prior_art_score": <integer 1-5>,
-  "faithfulness_notes": "<1-2 sentences: which system had more grounded/hallucinated content and why>",
+  "faithfulness_notes": "<1-2 sentences: which system had more hallucinated content and why>",
   "relevance_notes": "<1-2 sentences: which system was more specific vs generic and why>",
+  "grounding_notes": "<1-2 sentences: which system's output was more traceable to the provided patent excerpts>",
   "preferred_system": "<gemini|claude|tie>",
   "preference_reason": "<1-2 sentences>",
   "discrepancy_explanation": "<1-2 sentences or null>",
@@ -363,6 +371,9 @@ Evaluate on:
    numbers mean?
 2. **Relevance**: Are the density/diversity interpretations specific to this drug and
    jurisdiction, or are they generic descriptions that ignore the actual patent landscape?
+3. **Grounding**: Are the numeric scores (density, diversity, combined total) derived from
+   verifiable patent counts and categories, or do they appear to use unsubstantiated inputs?
+   Can the adjusted count and active areas be traced to actual patent data?
 
 Respond ONLY with valid JSON:
 {{
@@ -372,8 +383,11 @@ Respond ONLY with valid JSON:
   "claude_faithfulness_score": <integer 1-5>,
   "gemini_relevance_score": <integer 1-5, where 5=interpretation is specific to this drug/jurisdiction>,
   "claude_relevance_score": <integer 1-5>,
+  "gemini_grounding_score": <integer 1-5, where 5=scores traceable to patent data>,
+  "claude_grounding_score": <integer 1-5>,
   "faithfulness_notes": "<1 sentence on whether labels match numeric scores>",
   "relevance_notes": "<1 sentence on specificity of interpretations>",
+  "grounding_notes": "<1 sentence on whether numeric inputs are substantiated>",
   "discrepancy_explanation": "<explanation>",
   "data_consistency_flag": "<consistent|minor_divergence|major_divergence>",
   "recommended_final_score": <integer 1-5>,
@@ -399,6 +413,8 @@ Summary statistics:
 - Average Claude faithfulness: {avg_claude_faithfulness}
 - Average Gemini relevance: {avg_gemini_relevance}
 - Average Claude relevance: {avg_claude_relevance}
+- Average Gemini grounding: {avg_gemini_grounding}
+- Average Claude grounding: {avg_claude_grounding}
 - Score agreement rate: {score_agreement_pct}%
 
 Respond ONLY with valid JSON:
@@ -406,9 +422,11 @@ Respond ONLY with valid JSON:
   "overall_preferred_system": "<gemini|claude|tie>",
   "confidence": "<high|medium|low>",
   "faithfulness_winner": "<gemini|claude|tie>",
-  "faithfulness_summary": "<1-2 sentences comparing which system's outputs were more grounded in source data vs hallucinated>",
+  "faithfulness_summary": "<1-2 sentences comparing hallucination levels>",
   "relevance_winner": "<gemini|claude|tie>",
-  "relevance_summary": "<1-2 sentences comparing which system was more specific to the drug/patents vs generic>",
+  "relevance_summary": "<1-2 sentences comparing specificity to drug/patents>",
+  "grounding_winner": "<gemini|claude|tie>",
+  "grounding_summary": "<1-2 sentences comparing traceability to source patent data>",
   "key_strengths_gemini": ["<strength 1>", "<strength 2>"],
   "key_strengths_claude": ["<strength 1>", "<strength 2>"],
   "key_weaknesses_gemini": ["<weakness 1>"],
@@ -491,6 +509,8 @@ def run_overall_synthesis(client, drug, circ_evals, score_evals):
     avg_c_faith = _avg(circ_evals, "claude_faithfulness_score")
     avg_g_rel = _avg(circ_evals, "gemini_relevance_score")
     avg_c_rel = _avg(circ_evals, "claude_relevance_score")
+    avg_g_gnd = _avg(circ_evals, "gemini_grounding_score")
+    avg_c_gnd = _avg(circ_evals, "claude_grounding_score")
 
     score_matches = sum(1 for e in score_evals if e.get("scores_match"))
     score_total = len(score_evals) or 1
@@ -501,6 +521,7 @@ def run_overall_synthesis(client, drug, circ_evals, score_evals):
         avg_gemini_accuracy=avg_g_acc, avg_claude_accuracy=avg_c_acc,
         avg_gemini_faithfulness=avg_g_faith, avg_claude_faithfulness=avg_c_faith,
         avg_gemini_relevance=avg_g_rel, avg_claude_relevance=avg_c_rel,
+        avg_gemini_grounding=avg_g_gnd, avg_claude_grounding=avg_c_gnd,
         score_agreement_pct=round(score_matches / score_total * 100, 1),
     )
     return _call_claude(client, prompt)
@@ -635,6 +656,8 @@ def save_eval_to_excel(rows, drug=None):
          _avg_score(circ_rows, "eval_claude_faithfulness_score"), ""),
         ("Avg Relevance", _avg_score(circ_rows, "eval_gemini_relevance_score"),
          _avg_score(circ_rows, "eval_claude_relevance_score"), ""),
+        ("Avg Grounding", _avg_score(circ_rows, "eval_gemini_grounding_score"),
+         _avg_score(circ_rows, "eval_claude_grounding_score"), ""),
         ("Avg Accuracy", _avg_score(circ_rows, "eval_gemini_accuracy_score"),
          _avg_score(circ_rows, "eval_claude_accuracy_score"), ""),
         ("Avg Completeness", _avg_score(circ_rows, "eval_gemini_completeness_score"),
@@ -682,14 +705,17 @@ def save_eval_to_excel(rows, drug=None):
     if circ_rows:
         ws2 = wb.create_sheet("Circumvention")
         headers = [
-            "Drug", "Category", "Agreement",
-            "Gemini\nFaithfulness", "Claude\nFaithfulness",
-            "Gemini\nRelevance", "Claude\nRelevance",
-            "Gemini\nAccuracy", "Claude\nAccuracy",
-            "Gemini\nCompleteness", "Claude\nCompleteness",
-            "Gemini\nFeasibility", "Claude\nFeasibility",
-            "Gemini\nRegulatory", "Claude\nRegulatory",
-            "Winner", "Reason",
+            "Drug", "Category",
+            "Gemini Strategy", "Claude Strategy",
+            "Agreement", "Winner",
+            "G\nFaith", "C\nFaith",
+            "G\nGround", "C\nGround",
+            "G\nRelev", "C\nRelev",
+            "G\nAccur", "C\nAccur",
+            "G\nCompl", "C\nCompl",
+            "G\nFeasib", "C\nFeasib",
+            "G\nRegul", "C\nRegul",
+            "Reason",
         ]
         _write_header(ws2, 1, headers)
 
@@ -697,6 +723,8 @@ def save_eval_to_excel(rows, drug=None):
             rn = i + 2
             g_faith = r_data.get("eval_gemini_faithfulness_score")
             c_faith = r_data.get("eval_claude_faithfulness_score")
+            g_gnd = r_data.get("eval_gemini_grounding_score")
+            c_gnd = r_data.get("eval_claude_grounding_score")
             g_rel = r_data.get("eval_gemini_relevance_score")
             c_rel = r_data.get("eval_claude_relevance_score")
             g_acc = r_data.get("eval_gemini_accuracy_score")
@@ -709,31 +737,43 @@ def save_eval_to_excel(rows, drug=None):
             c_reg = r_data.get("eval_claude_regulatory_score")
             winner = r_data.get("eval_preferred_system", "")
 
+            # Full strategy text from pipeline outputs
+            g_strat = str(r_data.get("gemini_Strategy") or "")
+            c_strat = str(r_data.get("claude_Strategy") or "")
+            # Full reason — no truncation
+            reason = str(r_data.get("eval_preference_reason") or "")
+
             vals = [
                 r_data.get("Drug_Name", ""),
                 r_data.get("Patent_Category", ""),
+                g_strat, c_strat,
                 r_data.get("eval_agreement_level", ""),
-                g_faith, c_faith, g_rel, c_rel,
-                g_acc, c_acc, g_comp, c_comp,
-                g_feas, c_feas, g_reg, c_reg,
                 winner,
-                str(r_data.get("eval_preference_reason", ""))[:80],
+                g_faith, c_faith, g_gnd, c_gnd,
+                g_rel, c_rel, g_acc, c_acc,
+                g_comp, c_comp, g_feas, c_feas,
+                g_reg, c_reg,
+                reason,
             ]
             fills = [
-                None, None, None,
+                None, None, None, None, None,
+                green_fill if winner in ("gemini", "claude") else yellow_fill,
                 _score_fill(g_faith), _score_fill(c_faith),
+                _score_fill(g_gnd), _score_fill(c_gnd),
                 _score_fill(g_rel), _score_fill(c_rel),
                 _score_fill(g_acc), _score_fill(c_acc),
                 _score_fill(g_comp), _score_fill(c_comp),
                 _score_fill(g_feas), _score_fill(c_feas),
                 _score_fill(g_reg), _score_fill(c_reg),
-                green_fill if winner in ("gemini", "claude") else yellow_fill,
                 None,
             ]
             _write_row(ws2, rn, vals, fills=fills)
 
         _auto_width(ws2, min_w=8, max_w=30)
-        ws2.column_dimensions["Q"].width = 50  # Reason column wider
+        # Strategy + Reason columns need more width
+        ws2.column_dimensions["C"].width = 55  # Gemini Strategy
+        ws2.column_dimensions["D"].width = 55  # Claude Strategy
+        ws2.column_dimensions["U"].width = 60  # Reason
 
     # ══════════════════════════════════════════════════════════════════════
     # SHEET 3: Score Comparison
@@ -744,8 +784,9 @@ def save_eval_to_excel(rows, drug=None):
             "Drug", "Jurisdiction",
             "Gemini\nFinal Score", "Claude\nFinal Score",
             "Match?", "Delta",
-            "Gemini\nFaithfulness", "Claude\nFaithfulness",
-            "Gemini\nRelevance", "Claude\nRelevance",
+            "G\nFaith", "C\nFaith",
+            "G\nGround", "C\nGround",
+            "G\nRelev", "C\nRelev",
             "Recommended\nScore", "Consistency", "Assessment",
         ]
         _write_header(ws3, 1, headers)
@@ -762,11 +803,13 @@ def save_eval_to_excel(rows, drug=None):
                 r_data.get("eval_final_score_delta", ""),
                 r_data.get("eval_gemini_faithfulness_score", ""),
                 r_data.get("eval_claude_faithfulness_score", ""),
+                r_data.get("eval_gemini_grounding_score", ""),
+                r_data.get("eval_claude_grounding_score", ""),
                 r_data.get("eval_gemini_relevance_score", ""),
                 r_data.get("eval_claude_relevance_score", ""),
                 r_data.get("eval_recommended_final_score", ""),
                 r_data.get("eval_data_consistency_flag", ""),
-                str(r_data.get("eval_assessment", ""))[:80],
+                str(r_data.get("eval_assessment", "")),
             ]
             fills = [
                 None, None,
@@ -774,12 +817,13 @@ def save_eval_to_excel(rows, drug=None):
                 green_fill if match else red_fill, None,
                 _score_fill(vals[6]), _score_fill(vals[7]),
                 _score_fill(vals[8]), _score_fill(vals[9]),
-                _score_fill(vals[10]), None, None,
+                _score_fill(vals[10]), _score_fill(vals[11]),
+                _score_fill(vals[12]), None, None,
             ]
             _write_row(ws3, rn, vals, fills=fills)
 
         _auto_width(ws3, min_w=8, max_w=30)
-        ws3.column_dimensions["M"].width = 50
+        ws3.column_dimensions["O"].width = 60
 
     # ══════════════════════════════════════════════════════════════════════
     # SHEET 4: Judge Notes (faithfulness & relevance details)
@@ -788,8 +832,8 @@ def save_eval_to_excel(rows, drug=None):
         ws4 = wb.create_sheet("Judge Notes")
         headers = [
             "Drug", "Category", "Winner",
-            "Faithfulness Notes", "Relevance Notes",
-            "Discrepancy", "Combined Assessment",
+            "Faithfulness Notes", "Grounding Notes",
+            "Relevance Notes", "Discrepancy", "Combined Assessment",
         ]
         _write_header(ws4, 1, headers)
 
@@ -800,13 +844,14 @@ def save_eval_to_excel(rows, drug=None):
                 r_data.get("Patent_Category", ""),
                 r_data.get("eval_preferred_system", ""),
                 str(r_data.get("eval_faithfulness_notes", "")),
+                str(r_data.get("eval_grounding_notes", "")),
                 str(r_data.get("eval_relevance_notes", "")),
                 str(r_data.get("eval_discrepancy_explanation", "")),
                 str(r_data.get("eval_combined_assessment", "")),
             ]
             _write_row(ws4, rn, vals)
 
-        _auto_width(ws4, min_w=12, max_w=60)
+        _auto_width(ws4, min_w=12, max_w=65)
 
     # ── Save & upload ─────────────────────────────────────────────────────
     wb.save(fname)
@@ -1001,6 +1046,9 @@ def orchestrate(drug=None, skip_run=False, skip_gemini=False, skip_claude=False,
     print(f"  Relevance (avg)")
     print(f"    Gemini                 : {_avg(circ_evals, 'gemini_relevance_score')}")
     print(f"    Claude                 : {_avg(circ_evals, 'claude_relevance_score')}")
+    print(f"  Grounding (avg)")
+    print(f"    Gemini                 : {_avg(circ_evals, 'gemini_grounding_score')}")
+    print(f"    Claude                 : {_avg(circ_evals, 'claude_grounding_score')}")
     print(f"  Accuracy (avg)")
     print(f"    Gemini                 : {_avg(circ_evals, 'gemini_accuracy_score')}")
     print(f"    Claude                 : {_avg(circ_evals, 'claude_accuracy_score')}")
