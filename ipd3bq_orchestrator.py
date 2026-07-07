@@ -49,6 +49,8 @@ except ImportError:
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 BQ_PROJECT_ID = os.getenv("BQ_PROJECT_ID", "cognito-prod-394707")
 BQ_DATASET_ID = os.getenv("BQ_DATASET_ID", "cognito_prod_datamart")
 BQ_LOCATION   = os.getenv("BQ_LOCATION", "asia-south1")
@@ -66,7 +68,6 @@ CLAUDE_MODEL   = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 MAX_WORKERS    = 6
 LLM_MAX_TOKENS = 8192
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.getenv("IPD3_OUTPUT_DIR", os.path.join(SCRIPT_DIR, "ipd3_output"))
 
 EVAL_TABLE = "IPD3_Eval_Table"
