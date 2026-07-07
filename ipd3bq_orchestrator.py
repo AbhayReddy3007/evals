@@ -537,14 +537,281 @@ def upload_to_gcs(local_path: str) -> str:
 
 
 def save_eval_to_excel(rows, drug=None):
-    """Save eval results to Excel locally, then upload to GCS."""
+    """Build a clean, presentable multi-sheet comparison Excel and upload to GCS."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     fname = os.path.join(OUTPUT_DIR, f"ipd3_eval_{drug or 'all'}_{ts}.xlsx")
-    pd.DataFrame(rows).to_excel(fname, index=False)
+
+    wb = Workbook()
+
+    # ── Styles ────────────────────────────────────────────────────────────
+    hdr_font = Font(name="Arial", bold=True, color="FFFFFF", size=11)
+    hdr_fill = PatternFill("solid", fgColor="2F5496")
+    title_font = Font(name="Arial", bold=True, size=14, color="1F3864")
+    sub_font = Font(name="Arial", bold=True, size=11, color="2F5496")
+    cell_font = Font(name="Arial", size=10)
+    bold_font = Font(name="Arial", bold=True, size=10)
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    left = Alignment(horizontal="left", vertical="center", wrap_text=True)
+    thin = Border(
+        left=Side("thin"), right=Side("thin"),
+        top=Side("thin"), bottom=Side("thin"),
+    )
+    green_fill = PatternFill("solid", fgColor="E2EFDA")
+    red_fill = PatternFill("solid", fgColor="FCE4EC")
+    yellow_fill = PatternFill("solid", fgColor="FFF9C4")
+    light_gray = PatternFill("solid", fgColor="F5F5F5")
+
+    def _score_fill(val):
+        try:
+            v = int(float(val))
+        except (ValueError, TypeError):
+            return None
+        if v >= 4: return green_fill
+        if v == 3: return yellow_fill
+        if v <= 2: return red_fill
+        return None
+
+    def _write_header(ws, row, headers, col_start=1):
+        for i, h in enumerate(headers):
+            c = ws.cell(row=row, column=col_start + i, value=h)
+            c.font, c.fill, c.alignment, c.border = hdr_font, hdr_fill, center, thin
+
+    def _write_row(ws, row, values, col_start=1, fonts=None, fills=None):
+        for i, v in enumerate(values):
+            c = ws.cell(row=row, column=col_start + i, value=v)
+            c.font = (fonts[i] if fonts and i < len(fonts) else cell_font)
+            c.alignment = center if i > 0 else left
+            c.border = thin
+            if fills and i < len(fills) and fills[i]:
+                c.fill = fills[i]
+
+    def _auto_width(ws, min_w=10, max_w=40):
+        for col_cells in ws.columns:
+            length = max(len(str(c.value or "")) for c in col_cells)
+            ws.column_dimensions[get_column_letter(col_cells[0].column)].width = \
+                min(max(length + 2, min_w), max_w)
+
+    # ── Split rows by eval_type ───────────────────────────────────────────
+    circ_rows = [r for r in rows if r.get("eval_type") == "circumvention"]
+    score_rows = [r for r in rows if r.get("eval_type") == "thicket_score"]
+    synth_rows = [r for r in rows if r.get("eval_type") == "overall_synthesis"]
+
+    # ══════════════════════════════════════════════════════════════════════
+    # SHEET 1: Summary
+    # ══════════════════════════════════════════════════════════════════════
+    ws = wb.active
+    ws.title = "Summary"
+    ws.cell(row=1, column=1, value="IPD3 Evaluation — Gemini vs Claude").font = title_font
+    ws.cell(row=2, column=1, value=f"Drug: {drug or 'All'}  |  Date: {ts}  |  Judge: {CLAUDE_MODEL}").font = sub_font
+    ws.merge_cells("A1:F1")
+    ws.merge_cells("A2:F2")
+
+    # Preference counts
+    g_pref = sum(1 for r in circ_rows if r.get("eval_preferred_system") == "gemini")
+    c_pref = sum(1 for r in circ_rows if r.get("eval_preferred_system") == "claude")
+    tied = sum(1 for r in circ_rows if r.get("eval_preferred_system") == "tie")
+
+    def _avg_score(rows_list, key):
+        vals = [r.get(key) for r in rows_list if r.get(key) is not None]
+        nums = []
+        for v in vals:
+            try: nums.append(float(v))
+            except (ValueError, TypeError): pass
+        return round(sum(nums) / len(nums), 1) if nums else "—"
+
+    r = 4
+    _write_header(ws, r, ["Metric", "Gemini", "Claude", "Winner"])
+    metrics = [
+        ("Categories Evaluated", len(circ_rows), len(circ_rows), ""),
+        ("Preferred System", g_pref, c_pref,
+         "Gemini" if g_pref > c_pref else "Claude" if c_pref > g_pref else "Tie"),
+        ("Tied", tied, tied, ""),
+        ("Avg Faithfulness", _avg_score(circ_rows, "eval_gemini_faithfulness_score"),
+         _avg_score(circ_rows, "eval_claude_faithfulness_score"), ""),
+        ("Avg Relevance", _avg_score(circ_rows, "eval_gemini_relevance_score"),
+         _avg_score(circ_rows, "eval_claude_relevance_score"), ""),
+        ("Avg Accuracy", _avg_score(circ_rows, "eval_gemini_accuracy_score"),
+         _avg_score(circ_rows, "eval_claude_accuracy_score"), ""),
+        ("Avg Completeness", _avg_score(circ_rows, "eval_gemini_completeness_score"),
+         _avg_score(circ_rows, "eval_claude_completeness_score"), ""),
+        ("Avg Feasibility", _avg_score(circ_rows, "eval_gemini_feasibility_score"),
+         _avg_score(circ_rows, "eval_claude_feasibility_score"), ""),
+        ("Avg Regulatory", _avg_score(circ_rows, "eval_gemini_regulatory_score"),
+         _avg_score(circ_rows, "eval_claude_regulatory_score"), ""),
+        ("Avg Prior Art", _avg_score(circ_rows, "eval_gemini_prior_art_score"),
+         _avg_score(circ_rows, "eval_claude_prior_art_score"), ""),
+        ("Score Rows Match", sum(1 for r in score_rows if str(r.get("eval_scores_match")).lower() == "true"),
+         len(score_rows), ""),
+    ]
+    # Compute winners for avg metrics
+    for i, (metric, g, c, w) in enumerate(metrics):
+        if w == "" and isinstance(g, (int, float)) and isinstance(c, (int, float)) and g != c:
+            metrics[i] = (metric, g, c, "Gemini" if g > c else "Claude")
+        elif w == "":
+            metrics[i] = (metric, g, c, "Tie" if isinstance(g, (int, float)) else "")
+
+    for i, (metric, g, c, winner) in enumerate(metrics):
+        row_num = r + 1 + i
+        fill_g = green_fill if winner == "Gemini" else None
+        fill_c = green_fill if winner == "Claude" else None
+        _write_row(ws, row_num, [metric, g, c, winner],
+                   fonts=[bold_font, cell_font, cell_font, bold_font],
+                   fills=[light_gray, fill_g, fill_c, None])
+
+    # Synthesis notes
+    if synth_rows:
+        synth_start = r + len(metrics) + 3
+        ws.cell(row=synth_start, column=1, value="Per-Drug Synthesis").font = sub_font
+        for si, sr in enumerate(synth_rows):
+            row_num = synth_start + 1 + si
+            ws.cell(row=row_num, column=1, value=sr.get("Drug_Name", "")).font = bold_font
+            ws.cell(row=row_num, column=2, value=str(sr.get("synth_recommendation", ""))).font = cell_font
+            ws.cell(row=row_num, column=2).alignment = left
+            ws.merge_cells(start_row=row_num, start_column=2, end_row=row_num, end_column=6)
+
+    _auto_width(ws)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # SHEET 2: Circumvention Comparison
+    # ══════════════════════════════════════════════════════════════════════
+    if circ_rows:
+        ws2 = wb.create_sheet("Circumvention")
+        headers = [
+            "Drug", "Category", "Agreement",
+            "Gemini\nFaithfulness", "Claude\nFaithfulness",
+            "Gemini\nRelevance", "Claude\nRelevance",
+            "Gemini\nAccuracy", "Claude\nAccuracy",
+            "Gemini\nCompleteness", "Claude\nCompleteness",
+            "Gemini\nFeasibility", "Claude\nFeasibility",
+            "Gemini\nRegulatory", "Claude\nRegulatory",
+            "Winner", "Reason",
+        ]
+        _write_header(ws2, 1, headers)
+
+        for i, r_data in enumerate(circ_rows):
+            rn = i + 2
+            g_faith = r_data.get("eval_gemini_faithfulness_score")
+            c_faith = r_data.get("eval_claude_faithfulness_score")
+            g_rel = r_data.get("eval_gemini_relevance_score")
+            c_rel = r_data.get("eval_claude_relevance_score")
+            g_acc = r_data.get("eval_gemini_accuracy_score")
+            c_acc = r_data.get("eval_claude_accuracy_score")
+            g_comp = r_data.get("eval_gemini_completeness_score")
+            c_comp = r_data.get("eval_claude_completeness_score")
+            g_feas = r_data.get("eval_gemini_feasibility_score")
+            c_feas = r_data.get("eval_claude_feasibility_score")
+            g_reg = r_data.get("eval_gemini_regulatory_score")
+            c_reg = r_data.get("eval_claude_regulatory_score")
+            winner = r_data.get("eval_preferred_system", "")
+
+            vals = [
+                r_data.get("Drug_Name", ""),
+                r_data.get("Patent_Category", ""),
+                r_data.get("eval_agreement_level", ""),
+                g_faith, c_faith, g_rel, c_rel,
+                g_acc, c_acc, g_comp, c_comp,
+                g_feas, c_feas, g_reg, c_reg,
+                winner,
+                str(r_data.get("eval_preference_reason", ""))[:80],
+            ]
+            fills = [
+                None, None, None,
+                _score_fill(g_faith), _score_fill(c_faith),
+                _score_fill(g_rel), _score_fill(c_rel),
+                _score_fill(g_acc), _score_fill(c_acc),
+                _score_fill(g_comp), _score_fill(c_comp),
+                _score_fill(g_feas), _score_fill(c_feas),
+                _score_fill(g_reg), _score_fill(c_reg),
+                green_fill if winner in ("gemini", "claude") else yellow_fill,
+                None,
+            ]
+            _write_row(ws2, rn, vals, fills=fills)
+
+        _auto_width(ws2, min_w=8, max_w=30)
+        ws2.column_dimensions["Q"].width = 50  # Reason column wider
+
+    # ══════════════════════════════════════════════════════════════════════
+    # SHEET 3: Score Comparison
+    # ══════════════════════════════════════════════════════════════════════
+    if score_rows:
+        ws3 = wb.create_sheet("Thicket Scores")
+        headers = [
+            "Drug", "Jurisdiction",
+            "Gemini\nFinal Score", "Claude\nFinal Score",
+            "Match?", "Delta",
+            "Gemini\nFaithfulness", "Claude\nFaithfulness",
+            "Gemini\nRelevance", "Claude\nRelevance",
+            "Recommended\nScore", "Consistency", "Assessment",
+        ]
+        _write_header(ws3, 1, headers)
+
+        for i, r_data in enumerate(score_rows):
+            rn = i + 2
+            match = str(r_data.get("eval_scores_match", "")).lower() == "true"
+            vals = [
+                r_data.get("Drug_Name", ""),
+                r_data.get("Jurisdiction", ""),
+                r_data.get("gemini_Final_Score", ""),
+                r_data.get("claude_Final_Score", ""),
+                "Yes" if match else "No",
+                r_data.get("eval_final_score_delta", ""),
+                r_data.get("eval_gemini_faithfulness_score", ""),
+                r_data.get("eval_claude_faithfulness_score", ""),
+                r_data.get("eval_gemini_relevance_score", ""),
+                r_data.get("eval_claude_relevance_score", ""),
+                r_data.get("eval_recommended_final_score", ""),
+                r_data.get("eval_data_consistency_flag", ""),
+                str(r_data.get("eval_assessment", ""))[:80],
+            ]
+            fills = [
+                None, None,
+                _score_fill(vals[2]), _score_fill(vals[3]),
+                green_fill if match else red_fill, None,
+                _score_fill(vals[6]), _score_fill(vals[7]),
+                _score_fill(vals[8]), _score_fill(vals[9]),
+                _score_fill(vals[10]), None, None,
+            ]
+            _write_row(ws3, rn, vals, fills=fills)
+
+        _auto_width(ws3, min_w=8, max_w=30)
+        ws3.column_dimensions["M"].width = 50
+
+    # ══════════════════════════════════════════════════════════════════════
+    # SHEET 4: Judge Notes (faithfulness & relevance details)
+    # ══════════════════════════════════════════════════════════════════════
+    if circ_rows:
+        ws4 = wb.create_sheet("Judge Notes")
+        headers = [
+            "Drug", "Category", "Winner",
+            "Faithfulness Notes", "Relevance Notes",
+            "Discrepancy", "Combined Assessment",
+        ]
+        _write_header(ws4, 1, headers)
+
+        for i, r_data in enumerate(circ_rows):
+            rn = i + 2
+            vals = [
+                r_data.get("Drug_Name", ""),
+                r_data.get("Patent_Category", ""),
+                r_data.get("eval_preferred_system", ""),
+                str(r_data.get("eval_faithfulness_notes", "")),
+                str(r_data.get("eval_relevance_notes", "")),
+                str(r_data.get("eval_discrepancy_explanation", "")),
+                str(r_data.get("eval_combined_assessment", "")),
+            ]
+            _write_row(ws4, rn, vals)
+
+        _auto_width(ws4, min_w=12, max_w=60)
+
+    # ── Save & upload ─────────────────────────────────────────────────────
+    wb.save(fname)
     print(f"[EXCEL] Eval results → {fname}")
 
-    # Upload to GCS
     try:
         gcs_uri = upload_to_gcs(fname)
         print(f"[GCS] {gcs_uri}")
