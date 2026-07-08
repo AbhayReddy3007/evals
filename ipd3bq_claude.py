@@ -2,20 +2,17 @@
 Patent Thicket Analysis & Circumvention Strategy (505(b)(2)) — CLAUDE VERSION
 
 Identical logic to ipd3bq__6_.py but uses Claude Sonnet 4.6 (via AnthropicVertex)
-for all LLM analysis calls.
+instead of Gemini 2.5 Flash for all LLM calls.
 
 Key differences from ipd3bq__6_.py:
-  - LLM backend: Claude Sonnet 4.6 via AnthropicVertex for all analysis & reasoning
-  - Google Search grounding: Gemini is used ONLY as a search tool to retrieve
-    real-time web context (FDA, Orange Book, literature). Claude then analyses
-    that context — Gemini produces no final output.
+  - LLM backend: Claude Sonnet 4.6 via AnthropicVertex (replaces Gemini)
+  - No Google Search grounding; online fallback uses Claude's knowledge directly
   - Output BQ tables: Circumvention_Table_Claude, Patent_Thicket_Score_Table_Claude
   - Separate GCS checkpoint: ipd3_checkpoints_claude/
   - Adds Model_Used column to every BQ row
   - Always writes results to local JSON files (for orchestrator eval)
   - Supports --no-bq to skip BQ entirely (for local testing)
   - alloydb_client / cog imports are optional (stubs used if missing)
-  - google-genai is optional; if missing, search grounding is skipped gracefully
 """
 
 import os
@@ -30,18 +27,6 @@ import pandas as pd
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from anthropic import AnthropicVertex, RateLimitError
-
-# Google Search grounding — used ONLY to fetch real-time web context.
-# Claude performs all analysis; Gemini is the search transport only.
-try:
-    from google import genai as _genai
-    from google.genai import types as _genai_types
-    _HAS_GENAI = True
-except ImportError:
-    _genai = None
-    _genai_types = None
-    _HAS_GENAI = False
-    print("[IPD3BQ-CLAUDE] google-genai not installed — Google Search grounding disabled")
 
 try:
     from dotenv import load_dotenv
@@ -110,65 +95,9 @@ if CREDENTIALS_PATH and not os.path.isabs(CREDENTIALS_PATH):
     CREDENTIALS_PATH = os.path.join(SCRIPT_DIR, CREDENTIALS_PATH)
 
 # ── LLM Config ────────────────────────────────────────────────────────────────
-CLAUDE_MODEL   = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
-GCP_REGION     = os.getenv("GCP_REGION", "us-east5")
-PROJECT_ID     = os.getenv("BQ_PROJECT_ID", "cognito-prod-394707")
-
-# Gemini API key — only needed for Google Search grounding (context retrieval).
-# Claude performs all analysis regardless of whether this is set.
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-
-_genai_search_client = None
-
-def _get_genai_search_client():
-    """Return a cached Gemini client used solely for Google Search grounding."""
-    global _genai_search_client
-    if not _HAS_GENAI:
-        return None
-    if not GEMINI_API_KEY:
-        return None
-    if _genai_search_client is None:
-        _genai_search_client = _genai.Client(api_key=GEMINI_API_KEY)
-    return _genai_search_client
-
-
-def _build_search_config():
-    """Return a GenerateContentConfig with Google Search grounding enabled."""
-    if not _HAS_GENAI:
-        return None
-    search_tools = [_genai_types.Tool(google_search=_genai_types.GoogleSearch())]
-    return _genai_types.GenerateContentConfig(tools=search_tools, temperature=0.1)
-
-
-def _fetch_web_context(query: str, max_chars: int = 6000) -> str:
-    """
-    Use Gemini + Google Search grounding to retrieve real-time web context for
-    *query*. Returns the raw text Gemini surfaces (FDA pages, Orange Book entries,
-    literature snippets, etc.).  Claude then analyses this text — Gemini produces
-    no final structured output here.
-
-    Returns an empty string if grounding is unavailable or fails.
-    """
-    client = _get_genai_search_client()
-    if client is None:
-        return ""
-    config = _build_search_config()
-    retrieval_prompt = (
-        f"Search the web and return factual information relevant to the following query. "
-        f"Do not analyse or summarise — just surface the raw facts, names, dates, and "
-        f"source references you find.\n\nQuery: {query}"
-    )
-    try:
-        resp = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=retrieval_prompt,
-            config=config,
-        )
-        text = (resp.text or "").strip()
-        return text[:max_chars]
-    except Exception as e:
-        print(f"    [WARN] Google Search grounding failed: {e}")
-        return ""
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
+GCP_REGION   = os.getenv("GCP_REGION", "us-east5")
+PROJECT_ID   = os.getenv("BQ_PROJECT_ID", "cognito-prod-394707")
 
 # ── Output directory for local JSON results ───────────────────────────────────
 OUTPUT_DIR = os.getenv("IPD3_OUTPUT_DIR", os.path.join(SCRIPT_DIR, "ipd3_output"))
@@ -359,7 +288,7 @@ Respond ONLY with a valid JSON object — no markdown, no explanation outside th
 CIRCUMVENTION_SEARCH_PROMPT = """
 You are a pharmaceutical patent analyst. Analyse 505(b)(2) design-around opportunities
 for the drug "{drug}" in the "{claim_category}" patent category.
-{web_context_block}
+
 Specifically consider:
 1. FDA Drugs@FDA: alternative formulations, dosing regimens, delivery devices, or new indications
 2. FDA Orange Book: listed patents and expiry dates to identify product features NOT protected
@@ -382,11 +311,10 @@ strategy and patent design-around analysis.
 
 No patent text is available in the local database for the "{claim_category}"
 category patents of "{drug}" (patent numbers: {patent_numbers}).
-{web_context_block}
-Using the web context above (where provided) together with your knowledge of
-publicly available information — FDA Drugs@FDA, the FDA Orange Book, scientific
-literature, and patent databases — perform a full circumvention analysis for
-this category.
+
+Using your knowledge of publicly available information — FDA Drugs@FDA, the FDA
+Orange Book, scientific literature, and patent databases — perform a full
+circumvention analysis for this category.
 
 Return ONLY a valid JSON object:
 {{
@@ -633,12 +561,6 @@ CATEGORY_CONCURRENCY = 8
 
 
 async def _analyse_one_category(drug_name, category, patents, chroma_client):
-    """Analyse a single patent category.
-
-    Search context is fetched via Google Search grounding (Gemini as transport
-    only) and then passed to Claude for all reasoning and structured output.
-    If grounding is unavailable, Claude falls back to its own knowledge.
-    """
     print(f"\n[Circumvention] Category: {category} ({len(patents)} patent(s))")
     patent_numbers = [p["patent_number"] for p in patents]
 
@@ -656,22 +578,7 @@ async def _analyse_one_category(drug_name, category, patents, chroma_client):
 
     loop = asyncio.get_event_loop()
 
-    # ── Helper: fetch Google Search context in a thread ───────────────────────
-    def _search(query: str) -> str:
-        return _fetch_web_context(query)
-
-    def _web_context_block(raw: str) -> str:
-        """Wrap raw search text in a prompt section, or return empty string."""
-        if not raw:
-            return ""
-        return (
-            "\n--- WEB CONTEXT (retrieved via Google Search) ---\n"
-            + raw
-            + "\n--- END WEB CONTEXT ---\n"
-        )
-
     if all_chunks:
-        # ── Normal path: AlloyDB chunks available ─────────────────────────────
         chunks_text = "\n\n---\n\n".join(f"[Chunk {i+1}]\n{c}" for i, c in enumerate(all_chunks[:15]))
         prompt = CIRCUMVENTION_PROMPT.format(
             claim_category=category, drug=drug_name, chunks=chunks_text,
@@ -683,23 +590,9 @@ async def _analyse_one_category(drug_name, category, patents, chroma_client):
             print(f"    [WARN] Claude scoring error: {e}")
             result = {"claim_category": category, "design_around_strategies": [], "summary": f"Error: {e}"}
 
-        # ── Supplement: fetch FDA/literature context via Google Search, then
-        #    ask Claude to extract the structured fields ──────────────────────
-        search_query = (
-            f"{drug_name} {category} FDA Orange Book alternative formulation "
-            f"505(b)(2) design-around patent"
-        )
-        print(f"    Fetching FDA/literature context via Google Search...")
-        web_ctx = await loop.run_in_executor(_executor, _search, search_query)
-        if web_ctx:
-            print(f"    [INFO] Got {len(web_ctx)} chars of web context for FDA/lit search")
-        else:
-            print(f"    [INFO] No web context returned — Claude will use its own knowledge")
-
+        # FDA/literature search
         search_prompt = CIRCUMVENTION_SEARCH_PROMPT.format(
-            drug=drug_name, claim_category=category,
-            claim_category_lower=category.lower(),
-            web_context_block=_web_context_block(web_ctx),
+            drug=drug_name, claim_category=category, claim_category_lower=category.lower(),
         )
         try:
             search_text = await loop.run_in_executor(_executor, _call_claude_raw, search_prompt)
@@ -717,26 +610,12 @@ async def _analyse_one_category(drug_name, category, patents, chroma_client):
             result.setdefault("orange_book_gaps", [])
             result.setdefault("literature_alternatives", [])
             result.setdefault("regulatory_viability", f"Search error: {e}")
-
     else:
-        # ── Fallback path: no AlloyDB chunks ─────────────────────────────────
-        # Fetch web context via Google Search grounding, then hand everything
-        # to Claude for the full circumvention analysis.
-        print(f"    [INFO] No AlloyDB chunks — fetching web context via Google Search...")
-        online_query = (
-            f"{drug_name} {category} patents FDA Orange Book 505(b)(2) "
-            f"circumvention design-around alternative"
-        )
-        web_ctx = await loop.run_in_executor(_executor, _search, online_query)
-        if web_ctx:
-            print(f"    [INFO] Got {len(web_ctx)} chars of web context; Claude will analyse")
-        else:
-            print(f"    [INFO] No web context — Claude will use its own knowledge")
-
+        # Fallback: no chunks
+        print(f"    [INFO] No AlloyDB chunks — generating via Claude online knowledge...")
         online_prompt = CIRCUMVENTION_ONLINE_PROMPT.format(
             claim_category=category, drug=drug_name,
             patent_numbers=", ".join(str(x) for x in patent_numbers),
-            web_context_block=_web_context_block(web_ctx),
         )
         try:
             online_text = await loop.run_in_executor(_executor, _call_claude_raw, online_prompt)
@@ -766,8 +645,7 @@ async def _analyse_one_category(drug_name, category, patents, chroma_client):
 
 async def run_circumvention_analysis(drug_name, patents_by_category, chroma_client):
     t0 = time.time()
-    grounding_status = "Google Search grounding ON" if (_HAS_GENAI and GEMINI_API_KEY) else "Google Search grounding OFF (Claude knowledge only)"
-    print(f"\n[Circumvention] Analysing for {drug_name} (Claude | {grounding_status})...")
+    print(f"\n[Circumvention] Analysing for {drug_name} (Claude)...")
     semaphore = asyncio.Semaphore(CATEGORY_CONCURRENCY)
 
     async def _bounded(cat, pats):
@@ -842,17 +720,50 @@ def _bq_client():
 
 
 def _flatten_circumvention(circumvention_by_drug):
-    """Flatten circumvention results into rows (used by both BQ and JSON export)."""
+    """Flatten circumvention results into ONE ROW per Drug+Category.
+
+    All design-around strategies for a category are combined into a single
+    human-readable string:
+        "Strategy 1: <text> | Rationale: <text> | Feasibility: <text>\n
+         Strategy 2: <text> | ..."
+
+    This eliminates the one-row-per-strategy fan-out that caused repeated rows
+    and many-to-many join explosions in the orchestrator.
+    """
     rows = []
     for drug_name, circ_data in circumvention_by_drug.items():
         analysis_date = circ_data.get("analysis_date", "")
         for category, cat_result in circ_data.get("results_by_category", {}).items():
             strategies = cat_result.get("design_around_strategies", [])
-            common = dict(
-                Drug_Name=drug_name, Patent_Category=category,
+
+            # Build a single combined strategies string
+            if not strategies:
+                strategies_combined = "No strategies identified"
+            else:
+                parts = []
+                for i, s in enumerate(strategies, 1):
+                    strat = s.get("strategy", "")
+                    rat   = s.get("rationale", "")
+                    feas  = s.get("feasibility", "")
+                    path  = s.get("regulatory_pathway", "")
+                    prior = s.get("prior_art_support", "")
+                    line  = f"Strategy {i}: {strat}"
+                    if rat:   line += f" | Rationale: {rat}"
+                    if feas:  line += f" | Feasibility: {feas}"
+                    if path:  line += f" | Pathway: {path}"
+                    if prior: line += f" | Prior Art: {prior}"
+                    parts.append(line)
+                strategies_combined = "
+".join(parts)
+
+            rows.append(dict(
+                Drug_Name=drug_name,
+                Patent_Category=category,
                 Patents=", ".join(str(x) for x in cat_result.get("patent_numbers", [])),
                 Num_Patents=int(cat_result.get("patent_count", 0)),
                 Overall_Difficulty=cat_result.get("overall_circumvention_difficulty", "N/A"),
+                Strategies=strategies_combined,
+                Strategy_Count=len(strategies),
                 Key_Claim_Limitations="; ".join(str(x) for x in cat_result.get("key_claim_limitations", [])),
                 White_Space_Opportunities="; ".join(str(x) for x in cat_result.get("white_space_opportunities", [])),
                 FDA_Precedents="; ".join(str(x) for x in cat_result.get("fda_precedents", [])),
@@ -860,19 +771,9 @@ def _flatten_circumvention(circumvention_by_drug):
                 Literature_Alternatives="; ".join(str(x) for x in cat_result.get("literature_alternatives", [])),
                 Regulatory_Viability=cat_result.get("regulatory_viability", ""),
                 Summary=cat_result.get("summary", ""),
-                Analysis_Date=analysis_date, Model_Used="claude-sonnet-4-6",
-            )
-            if not strategies:
-                rows.append({**common, "Strategy": "No strategies identified",
-                             "Rationale": "", "Feasibility": "",
-                             "Regulatory_Pathway": "", "Prior_Art_Support": ""})
-            else:
-                for s in strategies:
-                    rows.append({**common, "Strategy": s.get("strategy", ""),
-                                 "Rationale": s.get("rationale", ""),
-                                 "Feasibility": s.get("feasibility", ""),
-                                 "Regulatory_Pathway": s.get("regulatory_pathway", ""),
-                                 "Prior_Art_Support": s.get("prior_art_support", "")})
+                Analysis_Date=analysis_date,
+                Model_Used="claude-sonnet-4-6",
+            ))
     return rows
 
 
