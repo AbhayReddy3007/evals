@@ -958,6 +958,22 @@ def orchestrate(drug=None, skip_run=False, skip_gemini=False, skip_claude=False,
         if no_bq_pipelines:
             pipeline_extra.append("--no-bq")
 
+        # If the JSON output files are missing (e.g. ipd3_output was deleted),
+        # the GCS checkpoint may still mark drugs as completed, causing pipelines
+        # to skip them and write nothing — leading to "No data" in the orchestrator.
+        # Detect this and force --rerun so the checkpoint is bypassed.
+        expected_files = [
+            os.path.join(OUTPUT_DIR, "circumvention_gemini.json"),
+            os.path.join(OUTPUT_DIR, "circumvention_claude.json"),
+            os.path.join(OUTPUT_DIR, "scores_gemini.json"),
+            os.path.join(OUTPUT_DIR, "scores_claude.json"),
+        ]
+        outputs_missing = not any(os.path.exists(f) for f in expected_files)
+        if outputs_missing and "--rerun" not in pipeline_extra:
+            print("\n[WARN] ipd3_output JSON files not found — injecting --rerun to bypass "
+                  "GCS checkpoint and regenerate results.")
+            pipeline_extra.append("--rerun")
+
         if not skip_gemini:
             run_gemini_pipeline(drug, pipeline_extra)
         else:
