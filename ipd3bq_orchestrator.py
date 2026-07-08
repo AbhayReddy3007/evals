@@ -172,8 +172,57 @@ def _load_json_safe(path: str) -> List[Dict]:
         return []
 
 
+def _ensure_one_row_per_category(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Safety net: if a JSON file still has multiple rows per Drug+Category
+    (e.g. old file on disk from before the flatten fix), collapse them into
+    one row by joining the Strategies column with newlines and taking the
+    first value for all other columns.
+    """
+    KEY_COLS = ["Drug_Name", "Patent_Category"]
+    if df.empty or not all(k in df.columns for k in KEY_COLS):
+        return df
+
+    if not df.duplicated(subset=KEY_COLS).any():
+        return df  # already clean, nothing to do
+
+    print("[LOAD] WARNING: multiple rows per Drug+Category detected in JSON — collapsing.")
+
+    def _combine_strategies(series):
+        # Combine Strategy / Strategies / old per-row columns into one string
+        vals = [str(v) for v in series if v is not None and str(v).strip() not in ("", "nan")]
+        if not vals:
+            return ""
+        if len(vals) == 1:
+            return vals[0]
+        # Re-number if they look like raw strategy text (not already numbered)
+        if not vals[0].startswith("Strategy 1:"):
+            return "
+".join(f"Strategy {i+1}: {v}" for i, v in enumerate(vals))
+        return "
+".join(vals)
+
+    agg = {}
+    for col in df.columns:
+        if col in KEY_COLS:
+            continue
+        if col in ("Strategies", "Strategy", "Rationale", "Feasibility",
+                   "Regulatory_Pathway", "Prior_Art_Support"):
+            agg[col] = _combine_strategies
+        else:
+            agg[col] = "first"
+
+    return df.groupby(KEY_COLS, sort=False).agg(agg).reset_index()
+
+
 def load_circumvention_results(drug=None) -> pd.DataFrame:
-    """Load Gemini + Claude circumvention results from local JSON, joined by Drug+Category."""
+    """Load Gemini + Claude circumvention results from local JSON.
+
+    Both pipelines write ONE ROW per Drug+Category (strategies combined into
+    a single Strategies column). A safety-net collapse is applied in case old
+    JSON files with one-row-per-strategy are still on disk. The final merge
+    is always a clean 1:1 join on Drug_Name + Patent_Category.
+    """
     gemini_rows = _load_json_safe(os.path.join(OUTPUT_DIR, "circumvention_gemini.json"))
     claude_rows = _load_json_safe(os.path.join(OUTPUT_DIR, "circumvention_claude.json"))
 
@@ -183,19 +232,23 @@ def load_circumvention_results(drug=None) -> pd.DataFrame:
     g_df = pd.DataFrame(gemini_rows) if gemini_rows else pd.DataFrame()
     c_df = pd.DataFrame(claude_rows) if claude_rows else pd.DataFrame()
 
-    # Prefix columns
+    # Collapse to 1 row per Drug+Category (safety net for old JSON files)
+    g_df = _ensure_one_row_per_category(g_df)
+    c_df = _ensure_one_row_per_category(c_df)
+
     if not g_df.empty:
-        g_key = g_df[["Drug_Name", "Patent_Category"]].copy()
         g_renamed = g_df.rename(columns={c: f"gemini_{c}" for c in g_df.columns if c not in ("Drug_Name", "Patent_Category")})
+        print(f"[LOAD] Gemini: {len(g_renamed)} Drug+Category rows")
     else:
         g_renamed = pd.DataFrame()
 
     if not c_df.empty:
         c_renamed = c_df.rename(columns={c: f"claude_{c}" for c in c_df.columns if c not in ("Drug_Name", "Patent_Category")})
+        print(f"[LOAD] Claude: {len(c_renamed)} Drug+Category rows")
     else:
         c_renamed = pd.DataFrame()
 
-    # Join
+    # 1:1 join
     if not g_renamed.empty and not c_renamed.empty:
         merged = pd.merge(g_renamed, c_renamed, on=["Drug_Name", "Patent_Category"], how="outer")
     elif not g_renamed.empty:
@@ -206,7 +259,7 @@ def load_circumvention_results(drug=None) -> pd.DataFrame:
     if drug and not merged.empty:
         merged = merged[merged["Drug_Name"].str.lower() == drug.lower()]
 
-    print(f"[LOAD] {len(merged)} circumvention comparison rows")
+    print(f"[LOAD] {len(merged)} circumvention rows (1 per Drug+Category)")
     return merged
 
 
@@ -447,26 +500,33 @@ def _safe_get(row, key, default="N/A"):
 
 
 def evaluate_circumvention_row(client, row):
+    # Strategies column (new format) with fallback to old Strategy column
+    def _strat(prefix):
+        v = _safe_get(row, f"{prefix}_Strategies")
+        if v == "N/A":
+            v = _safe_get(row, f"{prefix}_Strategy")
+        return v
+
     prompt = CIRCUMVENTION_EVAL_PROMPT.format(
         drug=_safe_get(row, "Drug_Name"),
         patent_category=_safe_get(row, "Patent_Category"),
         patents=_safe_get(row, "gemini_Patents") or _safe_get(row, "claude_Patents"),
         gemini_difficulty=_safe_get(row, "gemini_Overall_Difficulty"),
-        gemini_strategy=_safe_get(row, "gemini_Strategy"),
-        gemini_rationale=_safe_get(row, "gemini_Rationale"),
-        gemini_feasibility=_safe_get(row, "gemini_Feasibility"),
-        gemini_regulatory_pathway=_safe_get(row, "gemini_Regulatory_Pathway"),
-        gemini_prior_art_support=_safe_get(row, "gemini_Prior_Art_Support"),
+        gemini_strategy=_strat("gemini"),
+        gemini_rationale=_safe_get(row, "gemini_Rationale", ""),
+        gemini_feasibility=_safe_get(row, "gemini_Feasibility", ""),
+        gemini_regulatory_pathway=_safe_get(row, "gemini_Regulatory_Pathway", ""),
+        gemini_prior_art_support=_safe_get(row, "gemini_Prior_Art_Support", ""),
         gemini_key_claim_limitations=_safe_get(row, "gemini_Key_Claim_Limitations"),
         gemini_white_space=_safe_get(row, "gemini_White_Space_Opportunities"),
         gemini_fda_precedents=_safe_get(row, "gemini_FDA_Precedents"),
         gemini_summary=_safe_get(row, "gemini_Summary"),
         claude_difficulty=_safe_get(row, "claude_Overall_Difficulty"),
-        claude_strategy=_safe_get(row, "claude_Strategy"),
-        claude_rationale=_safe_get(row, "claude_Rationale"),
-        claude_feasibility=_safe_get(row, "claude_Feasibility"),
-        claude_regulatory_pathway=_safe_get(row, "claude_Regulatory_Pathway"),
-        claude_prior_art_support=_safe_get(row, "claude_Prior_Art_Support"),
+        claude_strategy=_strat("claude"),
+        claude_rationale=_safe_get(row, "claude_Rationale", ""),
+        claude_feasibility=_safe_get(row, "claude_Feasibility", ""),
+        claude_regulatory_pathway=_safe_get(row, "claude_Regulatory_Pathway", ""),
+        claude_prior_art_support=_safe_get(row, "claude_Prior_Art_Support", ""),
         claude_key_claim_limitations=_safe_get(row, "claude_Key_Claim_Limitations"),
         claude_white_space=_safe_get(row, "claude_White_Space_Opportunities"),
         claude_fda_precedents=_safe_get(row, "claude_FDA_Precedents"),
@@ -706,7 +766,7 @@ def save_eval_to_excel(rows, drug=None):
         ws2 = wb.create_sheet("Circumvention")
         headers = [
             "Drug", "Category",
-            "Gemini Strategy", "Claude Strategy",
+            "Gemini Strategies", "Claude Strategies",
             "Agreement", "Winner",
             "G\nFaith", "C\nFaith",
             "G\nGround", "C\nGround",
@@ -737,9 +797,9 @@ def save_eval_to_excel(rows, drug=None):
             c_reg = r_data.get("eval_claude_regulatory_score")
             winner = r_data.get("eval_preferred_system", "")
 
-            # Full strategy text from pipeline outputs
-            g_strat = str(r_data.get("gemini_Strategy") or "")
-            c_strat = str(r_data.get("claude_Strategy") or "")
+            # Combined strategies string — new format, fallback to old Strategy col
+            g_strat = str(r_data.get("gemini_Strategies") or r_data.get("gemini_Strategy") or "")
+            c_strat = str(r_data.get("claude_Strategies") or r_data.get("claude_Strategy") or "")
             # Full reason — no truncation
             reason = str(r_data.get("eval_preference_reason") or "")
 
@@ -904,6 +964,19 @@ def orchestrate(drug=None, skip_run=False, skip_gemini=False, skip_claude=False,
         pipeline_extra = list(extra_args or [])
         if no_bq_pipelines:
             pipeline_extra.append("--no-bq")
+
+        # If JSON output files are missing (e.g. ipd3_output deleted), the GCS
+        # checkpoint may still mark drugs as done → pipelines skip → "No data".
+        expected_files = [
+            os.path.join(OUTPUT_DIR, "circumvention_gemini.json"),
+            os.path.join(OUTPUT_DIR, "circumvention_claude.json"),
+            os.path.join(OUTPUT_DIR, "scores_gemini.json"),
+            os.path.join(OUTPUT_DIR, "scores_claude.json"),
+        ]
+        if not any(os.path.exists(f) for f in expected_files) and "--rerun" not in pipeline_extra:
+            print("\n[WARN] ipd3_output JSON files not found — injecting --rerun to bypass "
+                  "GCS checkpoint and regenerate results.")
+            pipeline_extra.append("--rerun")
 
         if not skip_gemini:
             run_gemini_pipeline(drug, pipeline_extra)
@@ -1093,7 +1166,7 @@ if __name__ == "__main__":
     parser.add_argument("--skip-circumvention", action="store_true")
     parser.add_argument("--refresh-scores", action="store_true")
     parser.add_argument("--rerun", action="store_true")
-    parser.add_argument("--max-patents-per-category", type=int, default=1000)
+    parser.add_argument("--max-patents-per-category", type=int, default=10)
     parser.add_argument("--csv-input", default=None,
                         help="Path to local CSV/Excel export of Master_LOE table. "
                              "Passed to both pipelines so they skip BigQuery reads.")
@@ -1103,7 +1176,7 @@ if __name__ == "__main__":
     if args.skip_circumvention: extra.append("--skip-circumvention")
     if args.refresh_scores: extra.append("--refresh-scores")
     if args.rerun: extra.append("--rerun")
-    if args.max_patents_per_category != 1000:
+    if args.max_patents_per_category != 10:
         extra.extend(["--max-patents-per-category", str(args.max_patents_per_category)])
     if args.csv_input:
         extra.extend(["--csv-input", args.csv_input])
