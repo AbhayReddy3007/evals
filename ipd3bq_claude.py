@@ -666,7 +666,7 @@ async def run_circumvention_analysis(drug_name, patents_by_category, chroma_clie
     }
 
 
-def get_circumvention_for_drugs(non_blocking_df, chroma_client, max_patents_per_category=1000):
+def get_circumvention_for_drugs(non_blocking_df, chroma_client, max_patents_per_category=10):
     cat_col = None
     for col_name in ["Step 1 Claim Category", "Patent Type"]:
         if col_name in non_blocking_df.columns:
@@ -720,17 +720,42 @@ def _bq_client():
 
 
 def _flatten_circumvention(circumvention_by_drug):
-    """Flatten circumvention results into rows (used by both BQ and JSON export)."""
+    """Flatten circumvention results into ONE ROW per Drug+Category.
+
+    All design-around strategies are combined into a single Strategies string:
+        Strategy 1: <text> | Rationale: <text> | Feasibility: <text>
+        Strategy 2: <text> | ...
+
+    This eliminates the one-row-per-strategy fan-out that caused Cartesian
+    product explosions in the orchestrator join.
+    """
     rows = []
     for drug_name, circ_data in circumvention_by_drug.items():
         analysis_date = circ_data.get("analysis_date", "")
         for category, cat_result in circ_data.get("results_by_category", {}).items():
             strategies = cat_result.get("design_around_strategies", [])
-            common = dict(
+
+            if not strategies:
+                strategies_combined = "No strategies identified"
+            else:
+                parts = []
+                for i, s in enumerate(strategies, 1):
+                    line = f"Strategy {i}: {s.get('strategy', '')}"
+                    if s.get("rationale"):          line += f" | Rationale: {s['rationale']}"
+                    if s.get("feasibility"):        line += f" | Feasibility: {s['feasibility']}"
+                    if s.get("regulatory_pathway"): line += f" | Pathway: {s['regulatory_pathway']}"
+                    if s.get("prior_art_support"):  line += f" | Prior Art: {s['prior_art_support']}"
+                    parts.append(line)
+                strategies_combined = "
+".join(parts)
+
+            rows.append(dict(
                 Drug_Name=drug_name, Patent_Category=category,
                 Patents=", ".join(str(x) for x in cat_result.get("patent_numbers", [])),
                 Num_Patents=int(cat_result.get("patent_count", 0)),
                 Overall_Difficulty=cat_result.get("overall_circumvention_difficulty", "N/A"),
+                Strategies=strategies_combined,
+                Strategy_Count=len(strategies),
                 Key_Claim_Limitations="; ".join(str(x) for x in cat_result.get("key_claim_limitations", [])),
                 White_Space_Opportunities="; ".join(str(x) for x in cat_result.get("white_space_opportunities", [])),
                 FDA_Precedents="; ".join(str(x) for x in cat_result.get("fda_precedents", [])),
@@ -739,18 +764,7 @@ def _flatten_circumvention(circumvention_by_drug):
                 Regulatory_Viability=cat_result.get("regulatory_viability", ""),
                 Summary=cat_result.get("summary", ""),
                 Analysis_Date=analysis_date, Model_Used="claude-sonnet-4-6",
-            )
-            if not strategies:
-                rows.append({**common, "Strategy": "No strategies identified",
-                             "Rationale": "", "Feasibility": "",
-                             "Regulatory_Pathway": "", "Prior_Art_Support": ""})
-            else:
-                for s in strategies:
-                    rows.append({**common, "Strategy": s.get("strategy", ""),
-                                 "Rationale": s.get("rationale", ""),
-                                 "Feasibility": s.get("feasibility", ""),
-                                 "Regulatory_Pathway": s.get("regulatory_pathway", ""),
-                                 "Prior_Art_Support": s.get("prior_art_support", "")})
+            ))
     return rows
 
 
@@ -869,7 +883,7 @@ def write_score_to_bq(drug_scores, refresh=False):
 EXCLUDED_CATEGORIES = {"Composition Of Matter"}
 
 def process_patents(skip_circumvention=False, drug_filter=None, refresh_scores=False,
-                    rerun=False, max_patents_per_category=1000, no_bq=False, csv_input=None):
+                    rerun=False, max_patents_per_category=10, no_bq=False, csv_input=None):
     """
     Main entry point. Returns a dict with circumvention_by_drug and drug_scores
     so the orchestrator can capture results directly when importing this module.
@@ -1056,7 +1070,7 @@ if __name__ == "__main__":
     parser.add_argument("--skip-circumvention", action="store_true")
     parser.add_argument("--refresh-scores", action="store_true")
     parser.add_argument("--rerun", action="store_true")
-    parser.add_argument("--max-patents-per-category", type=int, default=1000)
+    parser.add_argument("--max-patents-per-category", type=int, default=10)
     parser.add_argument("--no-bq", action="store_true",
                         help="Skip all BigQuery writes; output local JSON only")
     parser.add_argument("--csv-input", default=None,
