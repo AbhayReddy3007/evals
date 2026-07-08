@@ -844,7 +844,7 @@ async def run_circumvention_analysis(
 
 
 def get_circumvention_for_drugs(non_blocking_df: pd.DataFrame, chroma_client,
-                                max_patents_per_category: int = 1000) -> dict[str, dict]:
+                                max_patents_per_category: int = 10) -> dict[str, dict]:
     """Run circumvention analysis, limiting to max_patents_per_category patents per category."""
     cat_col = None
     for col_name in ["Step 1 Claim Category", "Patent Type"]:
@@ -911,7 +911,12 @@ BQ_SCORE_TABLE  = "Patent_Thicket_Score_Table"
 
 
 def write_results_to_json(circumvention_by_drug: dict, drug_scores: list):
-    """Write results to local JSON for orchestrator consumption."""
+    """Write results to local JSON for orchestrator consumption.
+
+    Circumvention: ONE ROW per Drug+Category. All strategies are combined into
+    a single Strategies string so the orchestrator can do a clean 1:1 join
+    without any Cartesian product fan-out.
+    """
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     if circumvention_by_drug:
         rows = []
@@ -919,11 +924,28 @@ def write_results_to_json(circumvention_by_drug: dict, drug_scores: list):
             analysis_date = circ_data.get("analysis_date", "")
             for category, cat_result in circ_data.get("results_by_category", {}).items():
                 strategies = cat_result.get("design_around_strategies", [])
-                common = dict(
+
+                if not strategies:
+                    strategies_combined = "No strategies identified"
+                else:
+                    parts = []
+                    for i, s in enumerate(strategies, 1):
+                        line = f"Strategy {i}: {s.get('strategy', '')}"
+                        if s.get("rationale"):   line += f" | Rationale: {s['rationale']}"
+                        if s.get("feasibility"): line += f" | Feasibility: {s['feasibility']}"
+                        if s.get("regulatory_pathway"): line += f" | Pathway: {s['regulatory_pathway']}"
+                        if s.get("prior_art_support"):  line += f" | Prior Art: {s['prior_art_support']}"
+                        parts.append(line)
+                    strategies_combined = "
+".join(parts)
+
+                rows.append(dict(
                     Drug_Name=drug_name, Patent_Category=category,
                     Patents=", ".join(str(x) for x in cat_result.get("patent_numbers", [])),
                     Num_Patents=int(cat_result.get("patent_count", 0)),
                     Overall_Difficulty=cat_result.get("overall_circumvention_difficulty", "N/A"),
+                    Strategies=strategies_combined,
+                    Strategy_Count=len(strategies),
                     Key_Claim_Limitations="; ".join(str(x) for x in cat_result.get("key_claim_limitations", [])),
                     White_Space_Opportunities="; ".join(str(x) for x in cat_result.get("white_space_opportunities", [])),
                     FDA_Precedents="; ".join(str(x) for x in cat_result.get("fda_precedents", [])),
@@ -932,22 +954,11 @@ def write_results_to_json(circumvention_by_drug: dict, drug_scores: list):
                     Regulatory_Viability=cat_result.get("regulatory_viability", ""),
                     Summary=cat_result.get("summary", ""),
                     Analysis_Date=analysis_date, Model_Used="gemini-2.5-flash",
-                )
-                if not strategies:
-                    rows.append({**common, "Strategy": "No strategies identified",
-                                 "Rationale": "", "Feasibility": "",
-                                 "Regulatory_Pathway": "", "Prior_Art_Support": ""})
-                else:
-                    for s in strategies:
-                        rows.append({**common, "Strategy": s.get("strategy", ""),
-                                     "Rationale": s.get("rationale", ""),
-                                     "Feasibility": s.get("feasibility", ""),
-                                     "Regulatory_Pathway": s.get("regulatory_pathway", ""),
-                                     "Prior_Art_Support": s.get("prior_art_support", "")})
+                ))
         path = os.path.join(OUTPUT_DIR, "circumvention_gemini.json")
         with open(path, "w") as f:
             json.dump(rows, f, indent=2, default=str)
-        print(f"[JSON] Circumvention → {path} ({len(rows)} rows)")
+        print(f"[JSON] Circumvention → {path} ({len(rows)} rows, 1 per Drug+Category)")
     if drug_scores:
         rows = []
         for sd in drug_scores:
@@ -980,69 +991,54 @@ def write_results_to_json(circumvention_by_drug: dict, drug_scores: list):
 def write_circumvention_to_bq(circumvention_by_drug: dict):
     """
     Flattens circumvention analysis results into rows and writes them to
-    BigQuery table: Circumvention_Table
-    One row per design-around strategy (or one placeholder row if none exist).
+    BigQuery table: Circumvention_Table.
+    ONE ROW per Drug+Category — all strategies combined into a single
+    Strategies column (consistent with the JSON output format).
 
     Columns
     -------
-    Drug_Name, Patent_Category, Patents, Num_Patents,
-    Overall_Difficulty, Strategy, Rationale, Feasibility,
-    Regulatory_Pathway, Prior_Art_Support, Key_Claim_Limitations,
-    White_Space_Opportunities, FDA_Precedents, Orange_Book_Gaps,
-    Literature_Alternatives, Regulatory_Viability, Summary,
-    Analysis_Date
+    Drug_Name, Patent_Category, Patents, Num_Patents, Overall_Difficulty,
+    Strategies, Strategy_Count, Key_Claim_Limitations, White_Space_Opportunities,
+    FDA_Precedents, Orange_Book_Gaps, Literature_Alternatives, Regulatory_Viability,
+    Summary, Analysis_Date
     """
     rows = []
     for drug_name, circ_data in circumvention_by_drug.items():
         analysis_date = circ_data.get("analysis_date", "")
         for category, cat_result in circ_data.get("results_by_category", {}).items():
-            strategies  = cat_result.get("design_around_strategies", [])
-            difficulty  = cat_result.get("overall_circumvention_difficulty", "N/A")
-            patent_nums = ", ".join(str(x) for x in cat_result.get("patent_numbers", []))
-            patent_count = int(cat_result.get("patent_count", 0))
-            limitations = "; ".join(str(x) for x in cat_result.get("key_claim_limitations", []))
-            white_space = "; ".join(str(x) for x in cat_result.get("white_space_opportunities", []))
-            fda_prec    = "; ".join(str(x) for x in cat_result.get("fda_precedents", []))
-            ob_gaps     = "; ".join(str(x) for x in cat_result.get("orange_book_gaps", []))
-            lit_alts    = "; ".join(str(x) for x in cat_result.get("literature_alternatives", []))
-            reg_viab    = cat_result.get("regulatory_viability", "")
-            summary     = cat_result.get("summary", "")
-
-            common = dict(
-                Drug_Name=drug_name,
-                Patent_Category=category,
-                Patents=patent_nums,
-                Num_Patents=patent_count,
-                Overall_Difficulty=difficulty,
-                Key_Claim_Limitations=limitations,
-                White_Space_Opportunities=white_space,
-                FDA_Precedents=fda_prec,
-                Orange_Book_Gaps=ob_gaps,
-                Literature_Alternatives=lit_alts,
-                Regulatory_Viability=reg_viab,
-                Summary=summary,
-                Analysis_Date=analysis_date,
-            )
+            strategies = cat_result.get("design_around_strategies", [])
 
             if not strategies:
-                rows.append({
-                    **common,
-                    "Strategy": "No strategies identified",
-                    "Rationale": "",
-                    "Feasibility": "",
-                    "Regulatory_Pathway": "",
-                    "Prior_Art_Support": "",
-                })
+                strategies_combined = "No strategies identified"
             else:
-                for strat in strategies:
-                    rows.append({
-                        **common,
-                        "Strategy":           strat.get("strategy", ""),
-                        "Rationale":          strat.get("rationale", ""),
-                        "Feasibility":        strat.get("feasibility", ""),
-                        "Regulatory_Pathway": strat.get("regulatory_pathway", ""),
-                        "Prior_Art_Support":  strat.get("prior_art_support", ""),
-                    })
+                parts = []
+                for i, s in enumerate(strategies, 1):
+                    line = f"Strategy {i}: {s.get('strategy', '')}"
+                    if s.get("rationale"):          line += f" | Rationale: {s['rationale']}"
+                    if s.get("feasibility"):        line += f" | Feasibility: {s['feasibility']}"
+                    if s.get("regulatory_pathway"): line += f" | Pathway: {s['regulatory_pathway']}"
+                    if s.get("prior_art_support"):  line += f" | Prior Art: {s['prior_art_support']}"
+                    parts.append(line)
+                strategies_combined = "
+".join(parts)
+
+            rows.append(dict(
+                Drug_Name=drug_name,
+                Patent_Category=category,
+                Patents=", ".join(str(x) for x in cat_result.get("patent_numbers", [])),
+                Num_Patents=int(cat_result.get("patent_count", 0)),
+                Overall_Difficulty=cat_result.get("overall_circumvention_difficulty", "N/A"),
+                Strategies=strategies_combined,
+                Strategy_Count=len(strategies),
+                Key_Claim_Limitations="; ".join(str(x) for x in cat_result.get("key_claim_limitations", [])),
+                White_Space_Opportunities="; ".join(str(x) for x in cat_result.get("white_space_opportunities", [])),
+                FDA_Precedents="; ".join(str(x) for x in cat_result.get("fda_precedents", [])),
+                Orange_Book_Gaps="; ".join(str(x) for x in cat_result.get("orange_book_gaps", [])),
+                Literature_Alternatives="; ".join(str(x) for x in cat_result.get("literature_alternatives", [])),
+                Regulatory_Viability=cat_result.get("regulatory_viability", ""),
+                Summary=cat_result.get("summary", ""),
+                Analysis_Date=analysis_date,
+            ))
 
     if not rows:
         print("[BQ] No circumvention rows to write.")
@@ -1241,7 +1237,7 @@ def write_score_to_bq(drug_scores: list, refresh=False):
 EXCLUDED_CATEGORIES = {"Composition Of Matter"}
 
 def process_patents(skip_circumvention=False, drug_filter=None, refresh_scores=False,
-                    rerun=False, max_patents_per_category=1000, no_bq=False):
+                    rerun=False, max_patents_per_category=10, no_bq=False):
     # ── Load from BigQuery ────────────────────────────────────────────────
     df = load_data_from_bigquery()
     df.columns = df.columns.str.strip()
@@ -1576,7 +1572,7 @@ if __name__ == "__main__":
         help="Bypass checkpoint and rerun everything (scoring + circumvention).",
     )
     parser.add_argument(
-        "--max-patents-per-category", type=int, default=1000,
+        "--max-patents-per-category", type=int, default=10,
         help="Max patents per category for circumvention analysis (default: 10).",
     )
     parser.add_argument(
