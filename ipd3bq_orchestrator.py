@@ -197,10 +197,8 @@ def _ensure_one_row_per_category(df: pd.DataFrame) -> pd.DataFrame:
             return vals[0]
         # Re-number if they look like raw strategy text (not already numbered)
         if not vals[0].startswith("Strategy 1:"):
-            return "
-".join(f"Strategy {i+1}: {v}" for i, v in enumerate(vals))
-        return "
-".join(vals)
+            return "\n".join(f"Strategy {i+1}: {v}" for i, v in enumerate(vals))
+        return "\n".join(vals)
 
     agg = {}
     for col in df.columns:
