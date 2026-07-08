@@ -936,8 +936,7 @@ def write_results_to_json(circumvention_by_drug: dict, drug_scores: list):
                         if s.get("regulatory_pathway"): line += f" | Pathway: {s['regulatory_pathway']}"
                         if s.get("prior_art_support"):  line += f" | Prior Art: {s['prior_art_support']}"
                         parts.append(line)
-                    strategies_combined = "
-".join(parts)
+                    strategies_combined = "\n".join(parts)
 
                 rows.append(dict(
                     Drug_Name=drug_name, Patent_Category=category,
@@ -1019,8 +1018,7 @@ def write_circumvention_to_bq(circumvention_by_drug: dict):
                     if s.get("regulatory_pathway"): line += f" | Pathway: {s['regulatory_pathway']}"
                     if s.get("prior_art_support"):  line += f" | Prior Art: {s['prior_art_support']}"
                     parts.append(line)
-                strategies_combined = "
-".join(parts)
+                strategies_combined = "\n".join(parts)
 
             rows.append(dict(
                 Drug_Name=drug_name,
