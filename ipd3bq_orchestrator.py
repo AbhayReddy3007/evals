@@ -172,8 +172,53 @@ def _load_json_safe(path: str) -> List[Dict]:
         return []
 
 
+def _collapse_circumvention_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Collapse a per-strategy circumvention DataFrame into one row per
+    Drug_Name + Patent_Category.
+
+    Strategy-level columns (one value per strategy) are concatenated as
+    "[1] ... [2] ..." strings so the judge can read each strategy distinctly.
+
+    All other columns are identical across rows for the same Drug+Category
+    (they come from the `common` dict in the pipeline), so we just take the
+    first value.
+    """
+    STRATEGY_COLS = [
+        "Strategy", "Rationale", "Feasibility",
+        "Regulatory_Pathway", "Prior_Art_Support",
+    ]
+    KEY_COLS = ["Drug_Name", "Patent_Category"]
+
+    def _numbered_join(series: pd.Series) -> str:
+        vals = [str(v) for v in series if v is not None and str(v).strip() not in ("", "nan")]
+        if not vals:
+            return ""
+        if len(vals) == 1:
+            return vals[0]
+        return "  ".join(f"[{i+1}] {v}" for i, v in enumerate(vals))
+
+    agg = {}
+    for col in df.columns:
+        if col in KEY_COLS:
+            continue
+        if col in STRATEGY_COLS:
+            agg[col] = _numbered_join
+        else:
+            agg[col] = "first"
+
+    collapsed = df.groupby(KEY_COLS, sort=False).agg(agg).reset_index()
+    return collapsed
+
+
 def load_circumvention_results(drug=None) -> pd.DataFrame:
-    """Load Gemini + Claude circumvention results from local JSON, joined by Drug+Category."""
+    """Load Gemini + Claude circumvention results from local JSON, joined by Drug+Category.
+
+    Each pipeline writes one row per design-around strategy, so a Drug+Category
+    with N strategies produces N rows. We collapse each side to one row per
+    Drug+Category (numbering strategies as [1] ... [2] ...) before joining,
+    giving a clean 1:1 merge instead of a many-to-many Cartesian product.
+    """
     gemini_rows = _load_json_safe(os.path.join(OUTPUT_DIR, "circumvention_gemini.json"))
     claude_rows = _load_json_safe(os.path.join(OUTPUT_DIR, "circumvention_claude.json"))
 
@@ -183,9 +228,17 @@ def load_circumvention_results(drug=None) -> pd.DataFrame:
     g_df = pd.DataFrame(gemini_rows) if gemini_rows else pd.DataFrame()
     c_df = pd.DataFrame(claude_rows) if claude_rows else pd.DataFrame()
 
-    # Prefix columns
+    # Collapse each side to one row per Drug+Category
     if not g_df.empty:
-        g_key = g_df[["Drug_Name", "Patent_Category"]].copy()
+        g_df = _collapse_circumvention_df(g_df)
+        print(f"[LOAD] Gemini: {len(g_df)} unique Drug+Category rows after collapse")
+
+    if not c_df.empty:
+        c_df = _collapse_circumvention_df(c_df)
+        print(f"[LOAD] Claude: {len(c_df)} unique Drug+Category rows after collapse")
+
+    # Prefix columns (excluding join keys)
+    if not g_df.empty:
         g_renamed = g_df.rename(columns={c: f"gemini_{c}" for c in g_df.columns if c not in ("Drug_Name", "Patent_Category")})
     else:
         g_renamed = pd.DataFrame()
@@ -195,7 +248,7 @@ def load_circumvention_results(drug=None) -> pd.DataFrame:
     else:
         c_renamed = pd.DataFrame()
 
-    # Join
+    # 1:1 join on Drug+Category
     if not g_renamed.empty and not c_renamed.empty:
         merged = pd.merge(g_renamed, c_renamed, on=["Drug_Name", "Patent_Category"], how="outer")
     elif not g_renamed.empty:
@@ -206,7 +259,7 @@ def load_circumvention_results(drug=None) -> pd.DataFrame:
     if drug and not merged.empty:
         merged = merged[merged["Drug_Name"].str.lower() == drug.lower()]
 
-    print(f"[LOAD] {len(merged)} circumvention comparison rows")
+    print(f"[LOAD] {len(merged)} circumvention comparison rows (1 per Drug+Category)")
     return merged
 
 
