@@ -844,7 +844,7 @@ async def run_circumvention_analysis(
 
 
 def get_circumvention_for_drugs(non_blocking_df: pd.DataFrame, chroma_client,
-                                max_patents_per_category: int = 10) -> dict[str, dict]:
+                                max_patents_per_category: int = 1000) -> dict[str, dict]:
     """Run circumvention analysis, limiting to max_patents_per_category patents per category."""
     cat_col = None
     for col_name in ["Step 1 Claim Category", "Patent Type"]:
@@ -1241,7 +1241,7 @@ def write_score_to_bq(drug_scores: list, refresh=False):
 EXCLUDED_CATEGORIES = {"Composition Of Matter"}
 
 def process_patents(skip_circumvention=False, drug_filter=None, refresh_scores=False,
-                    rerun=False, max_patents_per_category=10, no_bq=False):
+                    rerun=False, max_patents_per_category=1000, no_bq=False):
     # ── Load from BigQuery ────────────────────────────────────────────────
     df = load_data_from_bigquery()
     df.columns = df.columns.str.strip()
@@ -1576,7 +1576,7 @@ if __name__ == "__main__":
         help="Bypass checkpoint and rerun everything (scoring + circumvention).",
     )
     parser.add_argument(
-        "--max-patents-per-category", type=int, default=10,
+        "--max-patents-per-category", type=int, default=1000,
         help="Max patents per category for circumvention analysis (default: 10).",
     )
     parser.add_argument(
