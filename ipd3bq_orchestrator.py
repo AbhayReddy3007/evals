@@ -299,92 +299,200 @@ def load_score_results(drug=None) -> pd.DataFrame:
 # ── LLM-as-Judge Prompts ─────────────────────────────────────────────────────
 
 CIRCUMVENTION_EVAL_PROMPT = """
-You are a senior pharmaceutical patent attorney acting as an impartial LLM judge.
+You are a senior pharmaceutical patent attorney acting as an impartial evaluator.
 
 Two independent LLM systems analysed circumvention / 505(b)(2) design-around strategies
-for the same drug and patent category:
+for the same drug and patent category. You do NOT know which LLM produced which output.
+Evaluate each output purely on its own merits — do not attempt to guess which system
+generated it.
 
-  - System A: Gemini 2.5 Flash (primary pipeline)
-  - System B: Claude Sonnet 4.6 (secondary pipeline)
+IMPORTANT: Verify all factual claims against trustable, authoritative sources including:
+  - FDA Drugs@FDA database and approval packages
+  - FDA Orange Book (Approved Drug Products with Therapeutic Equivalence Evaluations)
+  - USPTO and Espacenet patent databases
+  - Peer-reviewed scientific and pharmaceutical literature
+  - Established patent law principles and case law
+Any claim, reference, or precedent that cannot be corroborated by these sources should
+be flagged as potentially fabricated or unverifiable.
 
 Drug: {drug}
 Patent Category: {patent_category}
 Patents: {patents}
 
---- GEMINI OUTPUT ---
-Difficulty: {gemini_difficulty}
-Strategy: {gemini_strategy}
-Rationale: {gemini_rationale}
-Feasibility: {gemini_feasibility}
-Regulatory Pathway: {gemini_regulatory_pathway}
-Prior Art Support: {gemini_prior_art_support}
-Key Claim Limitations: {gemini_key_claim_limitations}
-White Space: {gemini_white_space}
-FDA Precedents: {gemini_fda_precedents}
-Summary: {gemini_summary}
---- END GEMINI ---
+--- SYSTEM A OUTPUT ---
+Difficulty: {system_a_difficulty}
+Strategy: {system_a_strategy}
+Rationale: {system_a_rationale}
+Feasibility: {system_a_feasibility}
+Regulatory Pathway: {system_a_regulatory_pathway}
+Prior Art Support: {system_a_prior_art_support}
+Key Claim Limitations: {system_a_key_claim_limitations}
+White Space: {system_a_white_space}
+FDA Precedents: {system_a_fda_precedents}
+Summary: {system_a_summary}
+--- END SYSTEM A ---
 
---- CLAUDE OUTPUT ---
-Difficulty: {claude_difficulty}
-Strategy: {claude_strategy}
-Rationale: {claude_rationale}
-Feasibility: {claude_feasibility}
-Regulatory Pathway: {claude_regulatory_pathway}
-Prior Art Support: {claude_prior_art_support}
-Key Claim Limitations: {claude_key_claim_limitations}
-White Space: {claude_white_space}
-FDA Precedents: {claude_fda_precedents}
-Summary: {claude_summary}
---- END CLAUDE ---
+--- SYSTEM B OUTPUT ---
+Difficulty: {system_b_difficulty}
+Strategy: {system_b_strategy}
+Rationale: {system_b_rationale}
+Feasibility: {system_b_feasibility}
+Regulatory Pathway: {system_b_regulatory_pathway}
+Prior Art Support: {system_b_prior_art_support}
+Key Claim Limitations: {system_b_key_claim_limitations}
+White Space: {system_b_white_space}
+FDA Precedents: {system_b_fda_precedents}
+Summary: {system_b_summary}
+--- END SYSTEM B ---
 
-Evaluate both outputs on these dimensions:
-1. **Faithfulness**: Does the output avoid hallucinated references, fabricated patent
-   details, or unsupported assertions? Score LOW if the system invents specific patent
-   claims, cites non-existent FDA approvals, or presents fabricated prior art as fact.
-2. **Relevance**: Is the analysis specifically targeted to this drug and patent category?
-   Do the identified claim limitations and design-around strategies actually address the
-   patents listed, rather than providing generic boilerplate? Score LOW if the output
-   could apply to any drug/category interchangeably without meaningful customisation.
-3. **Grounding**: Can the key claims, limitations, and strategies in the output be traced
-   back to the specific patent excerpts / source data provided in the input? For each
-   strategy or limitation stated, is there a clear link to a passage in the patent chunks?
-   Score LOW if the output makes assertions that cannot be mapped to any provided source
-   text, even if the assertions happen to be factually plausible.
+Evaluate both outputs on the following dimensions. For EVERY score, you MUST provide
+a detailed justification explaining specifically WHY you assigned that score, citing
+concrete examples from the output.
+
+DIMENSION DEFINITIONS:
+
+1. **Faithfulness** (1-5): Does the output avoid hallucinated references, fabricated
+   patent details, or unsupported assertions?
+   - 5 = Every claim is verifiable; no fabricated references, patent numbers, FDA
+     approvals, or prior art. All assertions are supported by real data.
+   - 4 = Almost entirely faithful; at most one minor unverifiable claim that does not
+     affect the overall analysis.
+   - 3 = Mostly faithful but contains 2-3 unverifiable or potentially fabricated
+     claims (e.g. a cited FDA approval that may not exist, a vague prior art reference).
+   - 2 = Significant hallucination; multiple fabricated patent claims, non-existent FDA
+     approvals, or invented prior art references that undermine credibility.
+   - 1 = Predominantly hallucinated; most specific claims are fabricated or unverifiable.
+
+2. **Relevance** (1-5): Is the analysis specifically targeted to this drug and patent
+   category, or is it generic boilerplate?
+   - 5 = Every strategy and limitation is tailored to this specific drug's chemistry,
+     formulation, and patent landscape. Could not apply to a different drug unchanged.
+   - 4 = Mostly specific with minor generic elements that don't detract from the analysis.
+   - 3 = Mix of specific and generic content; some strategies clearly tailored, others
+     could apply to any drug in this class.
+   - 2 = Mostly generic; strategies use template language with only the drug name swapped.
+   - 1 = Entirely generic boilerplate; analysis is interchangeable with any drug/category.
+
+3. **Grounding** (1-5): Can the key claims, limitations, and strategies be traced back to
+   the specific patent excerpts or source data provided in the input?
    NOTE: Faithfulness asks "did it make things up?"; Grounding asks "did it use the source
-   data provided, and can we trace its claims back to those sources?".
-4. **Accuracy**: Are claim limitations and strategies technically/legally sound?
-5. **Completeness**: Does the analysis cover all viable circumvention approaches?
-6. **Feasibility Assessment**: Are feasibility ratings well-justified?
-7. **Regulatory Viability**: Are 505(b)(2) pathways realistic?
-8. **Prior Art Quality**: Are FDA/Orange Book/literature references relevant and specific?
+   data provided, and can we trace its claims back to those sources?"
+   - 5 = Every claim limitation and strategy directly references or clearly derives from
+     specific passages in the patent excerpts provided.
+   - 4 = Most claims are traceable to source data; 1-2 minor points lack explicit grounding.
+   - 3 = Partial grounding; about half the claims can be traced to patent excerpts, the
+     rest appear to come from general knowledge.
+   - 2 = Weak grounding; most claims cannot be mapped to provided patent text, even if
+     they are plausible.
+   - 1 = No grounding; output appears entirely disconnected from the provided patent data.
+
+4. **Accuracy** (1-5): Are the identified claim limitations and proposed design-around
+   strategies technically and legally sound?
+   - 5 = All claim limitations are correctly identified; strategies are legally defensible
+     and technically feasible based on established patent law and pharmaceutical science.
+   - 4 = Minor technical imprecision that would not affect strategic decisions.
+   - 3 = Some strategies have technical or legal weaknesses that would require revision.
+   - 2 = Significant errors in claim interpretation or legally unsound strategies.
+   - 1 = Fundamental misunderstanding of patent claims or proposed strategies that would
+     increase infringement risk.
+
+5. **Completeness** (1-5): Does the analysis cover all viable circumvention approaches?
+   - 5 = Exhaustive — covers all major design-around approaches including formulation,
+     process, device, and regulatory alternatives where applicable.
+   - 4 = Covers most viable approaches; one minor avenue omitted.
+   - 3 = Covers the obvious approaches but misses 1-2 viable alternatives.
+   - 2 = Significant gaps; only covers the most obvious approach.
+   - 1 = Superficial; only one trivially obvious strategy mentioned.
+
+6. **Feasibility Assessment** (1-5): Are feasibility ratings well-justified with
+   specific technical and commercial reasoning?
+   - 5 = Each feasibility rating is backed by concrete technical, manufacturing, and
+     commercial viability analysis with specific evidence.
+   - 4 = Ratings are reasonable with adequate justification; one could be better supported.
+   - 3 = Ratings are present but justifications are generic or superficial.
+   - 2 = Ratings appear arbitrary with minimal or no justification.
+   - 1 = Ratings are missing, contradictory, or clearly incorrect.
+
+7. **Regulatory Viability** (1-5): Are the proposed 505(b)(2) or other regulatory
+   pathways realistic and well-supported?
+   - 5 = Pathway analysis demonstrates deep regulatory knowledge; references specific
+     FDA guidance, precedent applications, and realistic bridging study requirements.
+   - 4 = Regulatory pathways are realistic with minor gaps in specificity.
+   - 3 = Pathways are plausible but lack specific FDA precedents or guidance references.
+   - 2 = Regulatory analysis is superficial or contains significant errors.
+   - 1 = Proposed pathways are unrealistic or demonstrate misunderstanding of 505(b)(2).
+
+8. **Prior Art Quality** (1-5): Are FDA/Orange Book/literature references relevant,
+   specific, and verifiable against trustable sources?
+   - 5 = All cited references are specific, verifiable, and directly relevant. FDA
+     approvals, Orange Book entries, and literature are precisely identified.
+   - 4 = Most references are specific and relevant; one minor reference lacks precision.
+   - 3 = Mix of specific and vague references; some useful, some too generic to verify.
+   - 2 = References are mostly vague, generic, or not directly relevant to this drug.
+   - 1 = No meaningful references provided, or references appear fabricated.
+
+9. **Strategy Correctness** (1-5): Are the proposed design-around strategies factually
+   correct, technically valid, and practically implementable? Cross-check each strategy
+   against known patent claims, FDA requirements, and pharmaceutical science.
+   - 5 = All strategies are factually correct, technically sound, and practically
+     implementable. Each strategy correctly identifies a claim limitation to omit and
+     proposes a viable alternative that would withstand legal scrutiny.
+   - 4 = Strategies are largely correct with minor technical imprecisions that would not
+     affect their viability as design-around approaches.
+   - 3 = Some strategies are correct but others contain errors in claim interpretation
+     or propose modifications that may not actually avoid infringement.
+   - 2 = Significant correctness issues; multiple strategies misidentify claim scope or
+     propose alternatives that would still infringe, or are technically unfeasible.
+   - 1 = Strategies are fundamentally incorrect — based on wrong claim interpretations,
+     propose impossible modifications, or would clearly still infringe.
 
 Respond ONLY with valid JSON:
 {{
   "agreement_level": "<full|partial|none>",
   "difficulty_agreement": <true or false>,
-  "gemini_faithfulness_score": <integer 1-5, where 5=no hallucinations, 1=mostly hallucinated>,
-  "claude_faithfulness_score": <integer 1-5>,
-  "gemini_relevance_score": <integer 1-5, where 5=highly specific to this drug/category, 1=generic boilerplate>,
-  "claude_relevance_score": <integer 1-5>,
-  "gemini_grounding_score": <integer 1-5, where 5=every claim traceable to source data, 1=no link to sources>,
-  "claude_grounding_score": <integer 1-5>,
-  "gemini_accuracy_score": <integer 1-5>,
-  "claude_accuracy_score": <integer 1-5>,
-  "gemini_completeness_score": <integer 1-5>,
-  "claude_completeness_score": <integer 1-5>,
-  "gemini_feasibility_score": <integer 1-5>,
-  "claude_feasibility_score": <integer 1-5>,
-  "gemini_regulatory_score": <integer 1-5>,
-  "claude_regulatory_score": <integer 1-5>,
-  "gemini_prior_art_score": <integer 1-5>,
-  "claude_prior_art_score": <integer 1-5>,
-  "faithfulness_notes": "<1-2 sentences: which system had more hallucinated content and why>",
-  "relevance_notes": "<1-2 sentences: which system was more specific vs generic and why>",
-  "grounding_notes": "<1-2 sentences: which system's output was more traceable to the provided patent excerpts>",
-  "preferred_system": "<gemini|claude|tie>",
-  "preference_reason": "<1-2 sentences>",
-  "discrepancy_explanation": "<1-2 sentences or null>",
-  "combined_assessment": "<2-3 sentence overall assessment>",
+  "system_a_faithfulness_score": <integer 1-5>,
+  "system_a_faithfulness_reason": "<2-3 sentences: specific examples of faithful or hallucinated content in System A>",
+  "system_b_faithfulness_score": <integer 1-5>,
+  "system_b_faithfulness_reason": "<2-3 sentences: specific examples of faithful or hallucinated content in System B>",
+  "system_a_relevance_score": <integer 1-5>,
+  "system_a_relevance_reason": "<2-3 sentences: how specific or generic System A's analysis is, with examples>",
+  "system_b_relevance_score": <integer 1-5>,
+  "system_b_relevance_reason": "<2-3 sentences: how specific or generic System B's analysis is, with examples>",
+  "system_a_grounding_score": <integer 1-5>,
+  "system_a_grounding_reason": "<2-3 sentences: which claims in System A trace back to patent excerpts>",
+  "system_b_grounding_score": <integer 1-5>,
+  "system_b_grounding_reason": "<2-3 sentences: which claims in System B trace back to patent excerpts>",
+  "system_a_accuracy_score": <integer 1-5>,
+  "system_a_accuracy_reason": "<2-3 sentences: technical/legal soundness of System A's analysis>",
+  "system_b_accuracy_score": <integer 1-5>,
+  "system_b_accuracy_reason": "<2-3 sentences: technical/legal soundness of System B's analysis>",
+  "system_a_completeness_score": <integer 1-5>,
+  "system_a_completeness_reason": "<2-3 sentences: what approaches System A covered or missed>",
+  "system_b_completeness_score": <integer 1-5>,
+  "system_b_completeness_reason": "<2-3 sentences: what approaches System B covered or missed>",
+  "system_a_feasibility_score": <integer 1-5>,
+  "system_a_feasibility_reason": "<2-3 sentences: how well System A justified its feasibility ratings>",
+  "system_b_feasibility_score": <integer 1-5>,
+  "system_b_feasibility_reason": "<2-3 sentences: how well System B justified its feasibility ratings>",
+  "system_a_regulatory_score": <integer 1-5>,
+  "system_a_regulatory_reason": "<2-3 sentences: realism of System A's regulatory pathway analysis>",
+  "system_b_regulatory_score": <integer 1-5>,
+  "system_b_regulatory_reason": "<2-3 sentences: realism of System B's regulatory pathway analysis>",
+  "system_a_prior_art_score": <integer 1-5>,
+  "system_a_prior_art_reason": "<2-3 sentences: quality and verifiability of System A's references>",
+  "system_b_prior_art_score": <integer 1-5>,
+  "system_b_prior_art_reason": "<2-3 sentences: quality and verifiability of System B's references>",
+  "system_a_strategy_correctness_score": <integer 1-5>,
+  "system_a_strategy_correctness_reason": "<2-3 sentences: are System A's strategies factually correct and implementable? which are correct and which are not?>",
+  "system_b_strategy_correctness_score": <integer 1-5>,
+  "system_b_strategy_correctness_reason": "<2-3 sentences: are System B's strategies factually correct and implementable? which are correct and which are not?>",
+  "faithfulness_notes": "<1-2 sentences comparing hallucination levels between systems>",
+  "relevance_notes": "<1-2 sentences comparing specificity between systems>",
+  "grounding_notes": "<1-2 sentences comparing traceability to patent excerpts>",
+  "preferred_system": "<system_a|system_b|tie>",
+  "preference_reason": "<2-3 sentences explaining overall preference>",
+  "discrepancy_explanation": "<2-3 sentences or null>",
+  "combined_assessment": "<3-4 sentence overall assessment of both systems>",
   "recommended_strategies": ["<best strategy 1>", "<best strategy 2>"]
 }}
 """
