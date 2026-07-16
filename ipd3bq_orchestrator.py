@@ -121,38 +121,48 @@ def _find_script(name):
     return os.path.join(SCRIPT_DIR, name)
 
 
-def run_gemini_pipeline(drug=None, extra_args=None):
-    script = _find_script("ipd3bq__6_.py")
+def _build_pipeline_cmd(script_name, drug=None, extra_args=None):
+    script = _find_script(script_name)
     cmd = [sys.executable, script]
     if drug: cmd.append(drug)
     if extra_args: cmd.extend(extra_args)
-
-    print(f"\n{'='*60}")
-    print(f"STEP 1: Running Gemini pipeline")
-    print(f"  Command: {' '.join(cmd)}")
-    print(f"{'='*60}\n")
-
-    result = subprocess.run(cmd)
-    if result.returncode != 0:
-        print(f"[WARN] Gemini pipeline exited with code {result.returncode}")
-    return result.returncode
+    return cmd
 
 
-def run_claude_pipeline(drug=None, extra_args=None):
-    script = _find_script("ipd3bq_claude.py")
-    cmd = [sys.executable, script]
-    if drug: cmd.append(drug)
-    if extra_args: cmd.extend(extra_args)
+def run_pipelines_parallel(drug=None, extra_args=None,
+                           skip_gemini=False, skip_claude=False):
+    """Run Gemini and Claude pipelines in parallel using subprocess.Popen."""
+    procs = {}
 
-    print(f"\n{'='*60}")
-    print(f"STEP 2: Running Claude pipeline")
-    print(f"  Command: {' '.join(cmd)}")
-    print(f"{'='*60}\n")
+    if not skip_gemini:
+        cmd_g = _build_pipeline_cmd("ipd3bq__6_.py", drug, extra_args)
+        print(f"\n{'='*60}")
+        print(f"STEP 1a: Launching Gemini pipeline (parallel)")
+        print(f"  Command: {' '.join(cmd_g)}")
+        print(f"{'='*60}")
+        procs["Gemini"] = subprocess.Popen(cmd_g)
+    else:
+        print("\n⏭️  Gemini pipeline skipped")
 
-    result = subprocess.run(cmd)
-    if result.returncode != 0:
-        print(f"[WARN] Claude pipeline exited with code {result.returncode}")
-    return result.returncode
+    if not skip_claude:
+        cmd_c = _build_pipeline_cmd("ipd3bq_claude.py", drug, extra_args)
+        print(f"\n{'='*60}")
+        print(f"STEP 1b: Launching Claude pipeline (parallel)")
+        print(f"  Command: {' '.join(cmd_c)}")
+        print(f"{'='*60}")
+        procs["Claude"] = subprocess.Popen(cmd_c)
+    else:
+        print("\n⏭️  Claude pipeline skipped")
+
+    # Wait for both to finish
+    if procs:
+        print(f"\n  Waiting for {len(procs)} pipeline(s) to complete ...")
+    for name, proc in procs.items():
+        rc = proc.wait()
+        if rc != 0:
+            print(f"[WARN] {name} pipeline exited with code {rc}")
+        else:
+            print(f"  [{name}] Done (exit 0)")
 
 
 # ── Step 3: Load Results from LOCAL JSON ──────────────────────────────────────
@@ -630,21 +640,13 @@ def orchestrate(drug=None, skip_run=False, skip_gemini=False, skip_claude=False,
     print(f"  JSON dir    : {OUTPUT_DIR}")
     print("=" * 70)
 
-    # ── Step 1 & 2: Run pipelines ────────────────────────────────────────
+    # ── Step 1: Run both pipelines in parallel ─────────────────────────
     if not skip_run:
         pipeline_extra = list(extra_args or [])
         if no_bq_pipelines:
             pipeline_extra.append("--no-bq")
 
-        if not skip_gemini:
-            run_gemini_pipeline(drug, pipeline_extra)
-        else:
-            print("\n⏭️  Gemini pipeline skipped")
-
-        if not skip_claude:
-            run_claude_pipeline(drug, pipeline_extra)
-        else:
-            print("\n⏭️  Claude pipeline skipped")
+        run_pipelines_parallel(drug, pipeline_extra, skip_gemini, skip_claude)
     else:
         print("\n⏭️  Both pipelines skipped (--skip-run)")
 
