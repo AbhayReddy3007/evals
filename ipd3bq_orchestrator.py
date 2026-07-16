@@ -470,6 +470,14 @@ def save_eval_to_excel(rows, drug=None):
     agreed_count = sum(1 for r in circ_rows if str(r.get("eval_agreement")).lower() == "true")
     total_count = len(circ_rows) or 1
 
+    def _avg_score(rows_list, key):
+        vals = [r.get(key) for r in rows_list if r.get(key) is not None]
+        nums = []
+        for v in vals:
+            try: nums.append(float(v))
+            except (ValueError, TypeError): pass
+        return round(sum(nums) / len(nums), 1) if nums else "—"
+
     # ══════════════════════════════════════════════════════════════════════
     # SHEET 1: Summary (Gemini evaluated against Claude ground truth)
     # ══════════════════════════════════════════════════════════════════════
