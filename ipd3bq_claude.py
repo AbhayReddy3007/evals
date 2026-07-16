@@ -405,8 +405,6 @@ def get_chroma_clients():
     return [_alloydb_client]
 
 def collection_name(drug: str) -> str:
-    if glp1_universe:
-        return f"patents_{glp1_universe.safe_collection_name(drug)}"
     return f"patents_{drug.strip().replace(' ', '_')}"
 
 def fetch_relevant_chunks(client, drug, source_file, sections, top_k=12):
@@ -454,30 +452,7 @@ def fetch_relevant_chunks(client, drug, source_file, sections, top_k=12):
     except Exception as e:
         print(f"    [WARN] Could not query collection '{primary_coll_name}': {e}")
 
-    print(f"    [INFO] '{exact_filename}' not found in '{primary_coll_name}' — checking filename→collection map...")
-
-    # ── Fallback: use pre-built filename→collection map (single SQL query,
-    #    cached for the entire run) instead of scanning every collection.
-    try:
-        from cog.indexer import get_filename_collection_map_sync
-
-        fmap = get_filename_collection_map_sync()
-        target_col_name = fmap.get(exact_filename)
-
-        if target_col_name and target_col_name != primary_coll_name:
-            try:
-                target_coll = _alloydb_client.get_collection(target_col_name)
-                docs = _query_collection(target_coll)
-                if docs:
-                    print(f"    [INFO] Found {len(docs)} chunks in mapped collection "
-                          f"'{target_col_name}' for '{exact_filename}'")
-                    return _rank_and_slice(docs)
-            except Exception as e:
-                print(f"    [WARN] Could not query mapped collection '{target_col_name}': {e}")
-    except ImportError:
-        print("    [WARN] cog.indexer not available — filename map fallback disabled.")
-
-    print(f"    [WARN] No chunks found for '{exact_filename}' in any collection.")
+    print(f"    [INFO] '{exact_filename}' not found in '{primary_coll_name}' — no fallback scan.")
     return []
 
 
@@ -687,11 +662,6 @@ def get_circumvention_for_drugs(non_blocking_df, chroma_client, max_patents_per_
         drugs_categories.setdefault(drug, {}).setdefault(cat, []).append(
             {"patent_number": pn, "drug_name": drug, "source_file": source_file})
 
-    for drug in drugs_categories:
-        for cat in drugs_categories[drug]:
-            if len(drugs_categories[drug][cat]) > max_patents_per_category:
-                drugs_categories[drug][cat] = drugs_categories[drug][cat][:max_patents_per_category]
-
     async def _run_all():
         tasks = {d: run_circumvention_analysis(d, pbc, chroma_client)
                  for d, pbc in drugs_categories.items()}
@@ -720,41 +690,17 @@ def _bq_client():
 
 
 def _flatten_circumvention(circumvention_by_drug):
-    """Flatten circumvention results into ONE ROW per Drug+Category.
-
-    All design-around strategies are combined into a single Strategies string:
-        Strategy 1: <text> | Rationale: <text> | Feasibility: <text>
-        Strategy 2: <text> | ...
-
-    This eliminates the one-row-per-strategy fan-out that caused Cartesian
-    product explosions in the orchestrator join.
-    """
+    """Flatten circumvention results into rows (used by both BQ and JSON export)."""
     rows = []
     for drug_name, circ_data in circumvention_by_drug.items():
         analysis_date = circ_data.get("analysis_date", "")
         for category, cat_result in circ_data.get("results_by_category", {}).items():
             strategies = cat_result.get("design_around_strategies", [])
-
-            if not strategies:
-                strategies_combined = "No strategies identified"
-            else:
-                parts = []
-                for i, s in enumerate(strategies, 1):
-                    line = f"Strategy {i}: {s.get('strategy', '')}"
-                    if s.get("rationale"):          line += f" | Rationale: {s['rationale']}"
-                    if s.get("feasibility"):        line += f" | Feasibility: {s['feasibility']}"
-                    if s.get("regulatory_pathway"): line += f" | Pathway: {s['regulatory_pathway']}"
-                    if s.get("prior_art_support"):  line += f" | Prior Art: {s['prior_art_support']}"
-                    parts.append(line)
-                strategies_combined = "\n".join(parts)
-
-            rows.append(dict(
+            common = dict(
                 Drug_Name=drug_name, Patent_Category=category,
                 Patents=", ".join(str(x) for x in cat_result.get("patent_numbers", [])),
                 Num_Patents=int(cat_result.get("patent_count", 0)),
                 Overall_Difficulty=cat_result.get("overall_circumvention_difficulty", "N/A"),
-                Strategies=strategies_combined,
-                Strategy_Count=len(strategies),
                 Key_Claim_Limitations="; ".join(str(x) for x in cat_result.get("key_claim_limitations", [])),
                 White_Space_Opportunities="; ".join(str(x) for x in cat_result.get("white_space_opportunities", [])),
                 FDA_Precedents="; ".join(str(x) for x in cat_result.get("fda_precedents", [])),
@@ -763,7 +709,18 @@ def _flatten_circumvention(circumvention_by_drug):
                 Regulatory_Viability=cat_result.get("regulatory_viability", ""),
                 Summary=cat_result.get("summary", ""),
                 Analysis_Date=analysis_date, Model_Used="claude-sonnet-4-6",
-            ))
+            )
+            if not strategies:
+                rows.append({**common, "Strategy": "No strategies identified",
+                             "Rationale": "", "Feasibility": "",
+                             "Regulatory_Pathway": "", "Prior_Art_Support": ""})
+            else:
+                for s in strategies:
+                    rows.append({**common, "Strategy": s.get("strategy", ""),
+                                 "Rationale": s.get("rationale", ""),
+                                 "Feasibility": s.get("feasibility", ""),
+                                 "Regulatory_Pathway": s.get("regulatory_pathway", ""),
+                                 "Prior_Art_Support": s.get("prior_art_support", "")})
     return rows
 
 
