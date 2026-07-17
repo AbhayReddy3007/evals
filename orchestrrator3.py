@@ -295,7 +295,8 @@ Evaluate THIS SINGLE Gemini strategy against the full ground-truth set:
 
 Also identify:
 - Which single ground-truth strategy (if any) this Gemini strategy most closely
-  matches, and how strong that match is.
+  matches, and how strong that match is. The ground-truth strategies above are
+  numbered "Strategy 1", "Strategy 2", etc. — use that number as the index.
 
 Respond ONLY with valid JSON:
 {{
@@ -307,6 +308,7 @@ Respond ONLY with valid JSON:
   "completeness_score": <1-5>,
   "feasibility_score": <1-5>,
   "regulatory_score": <1-5>,
+  "matched_gt_index": <the number (1-based) of the closest-matching ground truth "Strategy N" above, or null if none matches>,
   "best_matched_gt_strategy": "<brief description of the closest-matching ground truth strategy, or null if none>",
   "match_quality": "<exact | partial | none>",
   "faithfulness_notes": "<1-2 sentences>",
@@ -612,6 +614,67 @@ def save_eval_to_excel(strategy_results: List[Dict], category_agg: List[Dict],
         ], fills=[None, None, None, green if ag else red, None, None, None])
         ri += 1
     _auto(ws4, mn=12, mx=55)
+
+    # ── Sheet 5: Discrepancies (Claude findings Gemini missed) ─────────────
+    ws5 = wb.create_sheet("Discrepancies")
+    _hdr(ws5, 1, [
+        "Drug", "Category",
+        "All Claude Strategies (GT)", "All Gemini Strategies",
+        "Claude Found Additionally (Not Matched by Gemini)",
+    ])
+
+    def _numbered_list(items):
+        if not items:
+            return "(none)"
+        return "\n".join(f"{i}. {s.get('strategy', '')}" for i, s in enumerate(items, 1))
+
+    by_cat = {}
+    for r in strategy_results:
+        by_cat.setdefault((r["Drug_Name"], r["Patent_Category"]), []).append(r)
+
+    ri = 2
+    for (d, cat), rows in sorted(by_cat.items()):
+        cat_data = rows[0]["cat_data"]
+        claude_strats = cat_data.get("claude_strategies", [])
+        gemini_strats = cat_data.get("gemini_strategies", [])
+
+        # Indices (1-based, matching claude_strats order) of GT strategies
+        # that at least one Gemini strategy was judged to have matched.
+        matched_indices = set()
+        for r in rows:
+            e = r.get("eval", {})
+            if e.get("skipped") or not e.get("agreement"):
+                continue
+            idx = e.get("matched_gt_index")
+            try:
+                matched_indices.add(int(idx))
+            except (TypeError, ValueError):
+                pass
+
+        missing = [s for i, s in enumerate(claude_strats, 1) if i not in matched_indices]
+        if not claude_strats:
+            missing_text = "(no Claude strategies for this category)"
+        elif not missing:
+            missing_text = "(none — Gemini covered all Claude strategies)"
+        else:
+            missing_text = "\n".join(
+                f"{i}. {s.get('strategy', '')}"
+                for i, s in enumerate(claude_strats, 1) if i not in matched_indices
+            )
+
+        fill = yellow if missing else green
+        _row(ws5, ri, [
+            d, cat,
+            _numbered_list(claude_strats),
+            _numbered_list(gemini_strats),
+            missing_text,
+        ], fills=[None, None, None, None, fill])
+        ri += 1
+
+    _auto(ws5, mn=15, mx=55)
+    ws5.column_dimensions["C"].width = 55
+    ws5.column_dimensions["D"].width = 55
+    ws5.column_dimensions["E"].width = 55
 
     wb.save(fname)
     print(f"[EXCEL] → {fname}")
