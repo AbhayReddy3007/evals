@@ -542,7 +542,7 @@ def save_eval_to_excel(strategy_results: List[Dict], category_agg: List[Dict],
     ws3 = wb.create_sheet("Strategy-Level Results")
     _hdr(ws3, 1, [
         "Drug Name", "Patent Category", "Gemini Strategy Index",
-        "Gemini-Proposed Strategy", "Claude Ground Truth Strategies", "Best-Matched Ground Truth Strategy", "Match Quality",
+        "Gemini-Proposed Strategy", "Claude Strategies", "Best-Matched Claude Strategy", "Match Quality",
         "Agreement", "Faithfulness Score", "Grounding Score", "Relevance Score", "Accuracy Score",
         "Completeness Score", "Feasibility Score", "Regulatory Score",
         "Overall Assessment",
@@ -621,7 +621,7 @@ def save_eval_to_excel(strategy_results: List[Dict], category_agg: List[Dict],
     _hdr(ws5, 1, [
         "Drug Name", "Patent Category",
         "Claude Ground Truth Strategies (Complete Set)", "Gemini-Proposed Strategies (Complete Set)",
-        "Ground Truth Strategies Not Identified by Gemini",
+        "Claude Strategies Not Identified by Gemini",
         "Strategic Rationale & Significance",
     ])
 
