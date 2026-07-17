@@ -477,26 +477,26 @@ def save_eval_to_excel(strategy_results: List[Dict], category_agg: List[Dict],
     agreed = sum(1 for r in scored if r.get("eval", {}).get("agreement"))
     total_categories = len(category_agg)
 
-    # ── Sheet 1: Summary ──────────────────────────────────────────────────
+    # ── Sheet 1: Executive Summary ──────────────────────────────────────────
     ws = wb.active
-    ws.title = "Summary"
-    ws.cell(row=1, column=1, value="IPD3 Eval v3 — Gemini vs Claude (ground truth), strategy-level").font = title_font
-    ws.cell(row=2, column=1, value=f"Drug: {drug or 'All'}  |  Judge: {CLAUDE_MODEL}  |  Each Gemini strategy verified individually against all Claude strategies").font = sub_font
+    ws.title = "Executive Summary"
+    ws.cell(row=1, column=1, value="IPD3 Evaluation Report — Gemini vs. Claude (Ground Truth), Strategy-Level Analysis").font = title_font
+    ws.cell(row=2, column=1, value=f"Drug: {drug or 'All'}  |  Evaluator Model: {CLAUDE_MODEL}  |  Each Gemini-proposed strategy verified individually against the complete Claude ground-truth set").font = sub_font
     ws.merge_cells("A1:D1"); ws.merge_cells("A2:D2")
 
     _hdr(ws, 4, ["Metric", "Value", ""])
     summary_data = [
-        ("Categories Evaluated", total_categories, ""),
+        ("Patent Categories Evaluated", total_categories, ""),
         ("Gemini Strategies Evaluated", total_strats, ""),
-        ("Agreement Rate", f"{agreed}/{total_strats} ({round(agreed/(total_strats or 1)*100,1)}%)", ""),
+        ("Strategy Agreement Rate", f"{agreed}/{total_strats} ({round(agreed/(total_strats or 1)*100,1)}%)", ""),
         ("", "", ""),
-        ("Avg Faithfulness", _avg("faithfulness_score"), ""),
-        ("Avg Grounding", _avg("grounding_score"), ""),
-        ("Avg Relevance", _avg("relevance_score"), ""),
-        ("Avg Accuracy", _avg("accuracy_score"), ""),
-        ("Avg Completeness", _avg("completeness_score"), ""),
-        ("Avg Feasibility", _avg("feasibility_score"), ""),
-        ("Avg Regulatory", _avg("regulatory_score"), ""),
+        ("Average Faithfulness Score", _avg("faithfulness_score"), ""),
+        ("Average Grounding Score", _avg("grounding_score"), ""),
+        ("Average Relevance Score", _avg("relevance_score"), ""),
+        ("Average Accuracy Score", _avg("accuracy_score"), ""),
+        ("Average Completeness Score", _avg("completeness_score"), ""),
+        ("Average Feasibility Score", _avg("feasibility_score"), ""),
+        ("Average Regulatory Viability Score", _avg("regulatory_score"), ""),
     ]
     for i, (m, v, n) in enumerate(summary_data):
         fills = [gray, _sf(v) if isinstance(v, (int, float)) else None, None]
@@ -505,7 +505,7 @@ def save_eval_to_excel(strategy_results: List[Dict], category_agg: List[Dict],
 
     if synth_results:
         sr = len(summary_data) + 7
-        ws.cell(row=sr, column=1, value="Per-Drug Verdict").font = sub_font
+        ws.cell(row=sr, column=1, value="Per-Drug Recommendation").font = sub_font
         for si, s in enumerate(synth_results):
             ws.cell(row=sr+1+si, column=1, value=s.get("drug", "")).font = bold_font
             ws.cell(row=sr+1+si, column=2, value=str(s.get("synth", {}).get("recommendation", ""))).font = cell_font
@@ -514,13 +514,13 @@ def save_eval_to_excel(strategy_results: List[Dict], category_agg: List[Dict],
 
     _auto(ws)
 
-    # ── Sheet 2: Category Rollup ───────────────────────────────────────────
-    ws2 = wb.create_sheet("Category Rollup")
+    # ── Sheet 2: Category-Level Rollup ──────────────────────────────────────
+    ws2 = wb.create_sheet("Category-Level Rollup")
     _hdr(ws2, 1, [
-        "Drug", "Category", "GT Count", "Gemini Count",
-        "Gemini Strategies Agreed", "Agreement Rate",
-        "Avg Faith", "Avg Ground", "Avg Relev", "Avg Accur",
-        "Avg Compl", "Avg Feasib", "Avg Regul",
+        "Drug Name", "Patent Category", "Ground Truth Strategy Count", "Gemini Strategy Count",
+        "Strategies in Agreement", "Agreement Rate",
+        "Avg. Faithfulness Score", "Avg. Grounding Score", "Avg. Relevance Score", "Avg. Accuracy Score",
+        "Avg. Completeness Score", "Avg. Feasibility Score", "Avg. Regulatory Score",
     ])
     for i, r in enumerate(category_agg):
         rn = i + 2
@@ -539,11 +539,12 @@ def save_eval_to_excel(strategy_results: List[Dict], category_agg: List[Dict],
     _auto(ws2)
 
     # ── Sheet 3: Strategy-Level Results (one row per Gemini strategy) ─────
-    ws3 = wb.create_sheet("Strategy Results")
+    ws3 = wb.create_sheet("Strategy-Level Results")
     _hdr(ws3, 1, [
-        "Drug", "Category", "Gemini Strategy #",
-        "Gemini Strategy", "Claude Strategy (all GT)", "Best-Matched GT Strategy", "Match Quality",
-        "Agree", "Faith", "Ground", "Relev", "Accur", "Compl", "Feasib", "Regul",
+        "Drug Name", "Patent Category", "Gemini Strategy Index",
+        "Gemini-Proposed Strategy", "Claude Ground Truth Strategies", "Best-Matched Ground Truth Strategy", "Match Quality",
+        "Agreement", "Faithfulness Score", "Grounding Score", "Relevance Score", "Accuracy Score",
+        "Completeness Score", "Feasibility Score", "Regulatory Score",
         "Overall Assessment",
     ])
     for i, r in enumerate(strategy_results):
@@ -593,11 +594,11 @@ def save_eval_to_excel(strategy_results: List[Dict], category_agg: List[Dict],
     ws3.column_dimensions["F"].width = 45
     ws3.column_dimensions["P"].width = 55
 
-    # ── Sheet 4: Judge Notes ────────────────────────────────────────────────
-    ws4 = wb.create_sheet("Judge Notes")
+    # ── Sheet 4: Evaluator Commentary ───────────────────────────────────────
+    ws4 = wb.create_sheet("Evaluator Commentary")
     _hdr(ws4, 1, [
-        "Drug", "Category", "Gemini Strategy #", "Agreement",
-        "Faithfulness Notes", "Grounding Notes", "Relevance Notes",
+        "Drug Name", "Patent Category", "Gemini Strategy Index", "Agreement",
+        "Faithfulness Rationale", "Grounding Rationale", "Relevance Rationale",
     ])
     ri = 2
     for r in strategy_results:
@@ -615,18 +616,35 @@ def save_eval_to_excel(strategy_results: List[Dict], category_agg: List[Dict],
         ri += 1
     _auto(ws4, mn=12, mx=55)
 
-    # ── Sheet 5: Discrepancies (Claude findings Gemini missed) ─────────────
-    ws5 = wb.create_sheet("Discrepancies")
+    # ── Sheet 5: Coverage Gap Analysis (Claude findings Gemini missed) ─────
+    ws5 = wb.create_sheet("Coverage Gap Analysis")
     _hdr(ws5, 1, [
-        "Drug", "Category",
-        "All Claude Strategies (GT)", "All Gemini Strategies",
-        "Claude Found Additionally (Not Matched by Gemini)",
+        "Drug Name", "Patent Category",
+        "Claude Ground Truth Strategies (Complete Set)", "Gemini-Proposed Strategies (Complete Set)",
+        "Ground Truth Strategies Not Identified by Gemini",
+        "Strategic Rationale & Significance",
     ])
 
     def _numbered_list(items):
         if not items:
             return "(none)"
         return "\n".join(f"{i}. {s.get('strategy', '')}" for i, s in enumerate(items, 1))
+
+    def _explain(s):
+        parts = []
+        rationale = (s.get("rationale") or "").strip()
+        if rationale:
+            parts.append(rationale)
+        feas = (s.get("feasibility") or "").strip()
+        if feas:
+            parts.append(f"Feasibility: {feas}")
+        reg = (s.get("regulatory_pathway") or "").strip()
+        if reg:
+            parts.append(f"Regulatory pathway: {reg}")
+        prior = (s.get("prior_art_support") or "").strip()
+        if prior:
+            parts.append(f"Prior art support: {prior}")
+        return " | ".join(parts) if parts else "(no rationale provided)"
 
     by_cat = {}
     for r in strategy_results:
@@ -651,30 +669,32 @@ def save_eval_to_excel(strategy_results: List[Dict], category_agg: List[Dict],
             except (TypeError, ValueError):
                 pass
 
-        missing = [s for i, s in enumerate(claude_strats, 1) if i not in matched_indices]
+        missing_pairs = [(i, s) for i, s in enumerate(claude_strats, 1) if i not in matched_indices]
         if not claude_strats:
             missing_text = "(no Claude strategies for this category)"
-        elif not missing:
+            explain_text = "—"
+        elif not missing_pairs:
             missing_text = "(none — Gemini covered all Claude strategies)"
+            explain_text = "—"
         else:
-            missing_text = "\n".join(
-                f"{i}. {s.get('strategy', '')}"
-                for i, s in enumerate(claude_strats, 1) if i not in matched_indices
-            )
+            missing_text = "\n".join(f"{i}. {s.get('strategy', '')}" for i, s in missing_pairs)
+            explain_text = "\n".join(f"{i}. {_explain(s)}" for i, s in missing_pairs)
 
-        fill = yellow if missing else green
+        fill = yellow if missing_pairs else green
         _row(ws5, ri, [
             d, cat,
             _numbered_list(claude_strats),
             _numbered_list(gemini_strats),
             missing_text,
-        ], fills=[None, None, None, None, fill])
+            explain_text,
+        ], fills=[None, None, None, None, fill, None])
         ri += 1
 
     _auto(ws5, mn=15, mx=55)
     ws5.column_dimensions["C"].width = 55
     ws5.column_dimensions["D"].width = 55
     ws5.column_dimensions["E"].width = 55
+    ws5.column_dimensions["F"].width = 60
 
     wb.save(fname)
     print(f"[EXCEL] → {fname}")
