@@ -540,20 +540,23 @@ def save_eval_to_excel(strategy_results: List[Dict], category_agg: List[Dict],
     ws3 = wb.create_sheet("Strategy Results")
     _hdr(ws3, 1, [
         "Drug", "Category", "Gemini Strategy #",
-        "Gemini Strategy", "Best-Matched GT Strategy", "Match Quality",
+        "Gemini Strategy", "Claude Strategy (all GT)", "Best-Matched GT Strategy", "Match Quality",
         "Agree", "Faith", "Ground", "Relev", "Accur", "Compl", "Feasib", "Regul",
         "Overall Assessment",
     ])
     for i, r in enumerate(strategy_results):
         rn = i + 2
         e = r.get("eval", {})
+        claude_strats_all = "\n".join(
+            f"• {s.get('strategy','')}" for s in r["cat_data"].get("claude_strategies", [])
+        ) or "(none)"
         if e.get("skipped"):
             _row(ws3, rn, [
                 r["Drug_Name"], r["Patent_Category"], "—",
-                "(no Gemini strategies identified)", "", "",
+                "(no Gemini strategies identified)", claude_strats_all, "", "",
                 "N/A", "", "", "", "", "", "", "",
                 e.get("reason", ""),
-            ], fills=[None]*15)
+            ], fills=[None]*16)
             continue
         ag = e.get("agreement")
         gs = r.get("gemini_strategy") or {}
@@ -561,6 +564,7 @@ def save_eval_to_excel(strategy_results: List[Dict], category_agg: List[Dict],
             r["Drug_Name"], r["Patent_Category"],
             f"{r['gemini_index']} of {r['gemini_total']}",
             gs.get("strategy", ""),
+            claude_strats_all,
             str(e.get("best_matched_gt_strategy", "")),
             str(e.get("match_quality", "")),
             "TRUE" if ag else "FALSE",
@@ -571,7 +575,7 @@ def save_eval_to_excel(strategy_results: List[Dict], category_agg: List[Dict],
             str(e.get("overall_assessment", "")),
         ]
         fills = [
-            None, None, None, None, None, None,
+            None, None, None, None, None, None, None,
             green if ag else red,
             _sf(e.get("faithfulness_score")), _sf(e.get("grounding_score")),
             _sf(e.get("relevance_score")), _sf(e.get("accuracy_score")),
@@ -583,8 +587,9 @@ def save_eval_to_excel(strategy_results: List[Dict], category_agg: List[Dict],
 
     _auto(ws3, mn=8, mx=35)
     ws3.column_dimensions["D"].width = 55
-    ws3.column_dimensions["E"].width = 45
-    ws3.column_dimensions["O"].width = 55
+    ws3.column_dimensions["E"].width = 55
+    ws3.column_dimensions["F"].width = 45
+    ws3.column_dimensions["P"].width = 55
 
     # ── Sheet 4: Judge Notes ────────────────────────────────────────────────
     ws4 = wb.create_sheet("Judge Notes")
